@@ -1,0 +1,389 @@
+// ════════════════════════════════════════════════════════════════════════
+// TabStrategy — 전략 세팅 탭 (SmartSwing_Dashboard_v3 Tab3 완전 이식)
+// params 슬라이더 + 7개 검증 체크리스트 + 기본값 버튼
+// ════════════════════════════════════════════════════════════════════════
+import React, { useState, useMemo } from "react";
+import {
+  DEFAULT_PARAMS, CAPITAL_PER_SLOT, krw,
+  runBacktest,
+} from "../backtest.js";
+
+// ── ParamSlider 컴포넌트 (Tab3 외부 정의 — React 안티패턴 방지)
+function ParamSlider({ label, val, min, max, step, unit, note, reason, locked, pk, setParams }) {
+  const isReadOnly = locked || !pk;
+  return (
+    <div className={`mb-3 ${isReadOnly ? "opacity-40" : ""}`}>
+      <div className="flex justify-between mb-1">
+        <span className="text-xs text-slate-300">{label}</span>
+        <span className={`text-xs font-bold ${isReadOnly ? "text-slate-500" : "text-indigo-300"}`}>{val}{unit}</span>
+      </div>
+      {pk ? (
+        <input type="range" min={min} max={max} step={step} value={val} disabled={locked}
+          onChange={e => setParams(p => ({ ...p, [pk]: +e.target.value }))}
+          className="w-full h-1.5 accent-indigo-500 bg-slate-700 rounded-full cursor-pointer disabled:cursor-not-allowed"/>
+      ) : (
+        <input type="range" min={min} max={max} step={step} defaultValue={val} disabled
+          className="w-full h-1.5 accent-indigo-500 bg-slate-700 rounded-full cursor-not-allowed"/>
+      )}
+      {note   && <p className="text-[10px] text-slate-500 mt-0.5">★ {note}</p>}
+      {reason && <p className="text-[10px] text-amber-600/80 mt-0.5 flex items-center gap-1"><span>⚠</span>{reason}</p>}
+    </div>
+  );
+}
+
+// SIM_ATR (실시간 시뮬 탭 ATR 표시용)
+const SIM_ATR = {
+  "005930": { atr: 1420,  price: 72000,  name: "삼성전자"    },
+  "035420": { atr: 4800,  price: 207800, name: "NAVER"       },
+  "000660": { atr: 5200,  price: 204200, name: "SK하이닉스"  },
+  "051910": { atr: 8500,  price: 312000, name: "LG화학"      },
+  "373220": { atr: 3100,  price: 76000,  name: "LG에너지"    },
+  "207940": { atr: 12000, price: 810000, name: "삼성바이오"  },
+  "005380": { atr: 3200,  price: 218000, name: "현대차"      },
+  "066570": { atr: 2100,  price: 91000,  name: "LG전자"      },
+  "035720": { atr: 1800,  price: 48000,  name: "카카오"      },
+  "096770": { atr: 4300,  price: 168000, name: "SK이노베이션" },
+};
+
+// ── 메인 전략 세팅 탭
+export default function TabStrategy({ params, setParams, setTab, period }) {
+  const [saved, setSaved]     = useState(false);
+  const [rerunning, setRerun] = useState(false);
+
+  const handleSave = () => {
+    try { localStorage.setItem("smartswing_params", JSON.stringify(params)); } catch(e) {}
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2500);
+  };
+
+  const handleRerun = () => {
+    setRerun(true);
+    setTimeout(() => { setRerun(false); setTab(0); }, 1200);
+  };
+
+  const handleReset = () => {
+    try { localStorage.removeItem("smartswing_params"); } catch(e) {}
+    setParams({ ...DEFAULT_PARAMS });
+  };
+
+  // ── 파라미터 변경 검증 체크리스트 (자동 재계산)
+  const validationResults = useMemo(() => {
+    const { curve } = runBacktest("5년", params);
+
+    const getYearRet = (startDate, endDate) => {
+      const si = curve.findIndex(p => p.date === startDate);
+      const ei = curve.findIndex(p => p.date === endDate);
+      if (si < 0 || ei < 0 || ei <= si) return null;
+      return +((curve[ei].strategy / curve[si].strategy - 1) * 100).toFixed(1);
+    };
+
+    const r2022 = getYearRet("21-12", "22-12");
+    const r2023 = getYearRet("22-12", "23-12");
+    const r2024 = getYearRet("23-12", "24-12");
+    const r2025 = getYearRet("24-12", "25-12");
+
+    let peak = 0, maxDD = 0;
+    curve.forEach(p => {
+      if (p.strategy > peak) peak = p.strategy;
+      const dd = (p.strategy - peak) / peak * 100;
+      if (dd < maxDD) maxDD = dd;
+    });
+    const mdd5y = +maxDD.toFixed(1);
+
+    const monthlyRets = [];
+    for (let i = 1; i < curve.length; i++) {
+      monthlyRets.push((curve[i].strategy - curve[i-1].strategy) / curve[i-1].strategy * 100);
+    }
+    const meanR    = monthlyRets.reduce((a, b) => a + b, 0) / monthlyRets.length;
+    const stdR     = Math.sqrt(monthlyRets.reduce((a, b) => a + (b - meanR) ** 2, 0) / monthlyRets.length);
+    const sharpe5y = stdR > 0 ? +((meanR / stdR) * Math.sqrt(12)).toFixed(2) : 0;
+
+    const strat5y = +((curve[curve.length - 1]?.strategy - 100).toFixed(1));
+    const bh5y    = +((curve[curve.length - 1]?.buyhold   - 100).toFixed(1));
+
+    const checks = [
+      { cat:"📈 상승장", label:"2023 회복(+23.5%)",  val:r2023,          pass: r2023  !== null && r2023  >= 10,   desc:"전략 ≥ +10% 포착" },
+      { cat:"📈 상승장", label:"2025 폭등(+90.7%)",  val:r2025,          pass: r2025  !== null && r2025  >= 50,   desc:"전략 ≥ +50% 포착" },
+      { cat:"📈 상승장", label:"5년 전략 > B&H",     val:strat5y - bh5y, pass: strat5y > bh5y,                   desc:"KOSPI B&H 초과 수익" },
+      { cat:"📉 하락장", label:"2022 하락(-26.4%)",   val:r2022,          pass: r2022  !== null && r2022  > -20,  desc:"전략 > -20% 방어" },
+      { cat:"📉 하락장", label:"2024 하락(-11.9%)",   val:r2024,          pass: r2024  !== null && r2024  > -8,   desc:"전략 > -8% 방어" },
+      { cat:"🛡 안전성",  label:"5년 MDD",            val:mdd5y,          pass: mdd5y  > -50,                     desc:"> -50% 준수" },
+      { cat:"🛡 안전성",  label:"Sharpe 5년",         val:sharpe5y,       pass: sharpe5y >= 0.5,                  desc:"≥ 0.5 권장" },
+    ];
+
+    const passCount = checks.filter(c => c.pass).length;
+    return { checks, passCount, total: checks.length };
+  }, [params]);
+
+  const ps = setParams;
+
+  return (
+    <div className="space-y-4">
+
+      {/* 실시간 반영 안내 배너 */}
+      <div className="px-4 py-2.5 bg-indigo-900/30 border border-indigo-700/60 rounded-xl text-xs text-indigo-300 flex items-center gap-2">
+        <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse"/>
+        파라미터 변경은 <span className="font-bold">즉시 자동 반영</span>됩니다 — 백테스팅 탭에서 실시간 확인 가능
+        <span className="ml-auto text-indigo-500 text-[10px]">현재 기간: <span className="text-indigo-300 font-bold">{period}</span></span>
+      </div>
+
+      {saved && (
+        <div className="px-4 py-2.5 bg-emerald-900/40 border border-emerald-600 rounded-xl text-sm text-emerald-300 flex items-center gap-2">
+          ✅ 설정이 저장되었습니다.
+        </div>
+      )}
+
+      {/* ── 자금 관리 */}
+      <div className="bg-slate-800 rounded-xl p-4 border border-slate-700">
+        <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">자금 관리</p>
+        <div className="grid grid-cols-2 gap-6">
+          <ParamSlider label="종목당 투자금 (만원)" val={1000} min={500} max={3000} step={100} unit="만" note="고정 슬롯 — ATR 동적 사이징 미사용" setParams={ps}/>
+          <ParamSlider label="최대 동시 보유 종목" val={5} min={1} max={10} step={1} unit="종목" note="총 최대 투자금 = 1,000만 × 5 = 5,000만원" setParams={ps}/>
+        </div>
+        <div className="mt-2 p-2 bg-indigo-900/20 rounded-lg border border-indigo-800/40 text-[10px] text-indigo-300">
+          <span className="font-bold">규칙 5 [v10]</span> 동일 GICS 섹터 최대 2종목 동시 보유
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-4">
+
+        {/* ── L1 Market Shield */}
+        <div className="bg-slate-800 rounded-xl p-4 border border-slate-700">
+          <div className="flex items-center gap-2 mb-3">
+            <span className="px-2 py-0.5 bg-indigo-900 text-indigo-200 rounded text-xs font-bold">L1</span>
+            <p className="text-xs font-bold text-slate-300">Market Shield</p>
+            <span className="ml-auto text-[9px] px-1.5 py-0.5 bg-amber-900/60 text-amber-300 rounded border border-amber-700/50">⚠ proxy 미작동</span>
+          </div>
+          <div className="mb-2 p-2 bg-amber-950/40 border border-amber-800/40 rounded-lg text-[9px] text-amber-300 leading-relaxed">
+            <span className="font-bold text-amber-200">현재 proxy 비활성</span> — 직전월 KOSPI 수익률 기반 proxy는 5년 시뮬(2021~2026) 전체에서 <span className="font-bold">차단 0건</span>. 대형 하락 직전달이 대부분 보합(-0.15% 수준)이어서 임계값 도달 불가. KIS API 실연동 시 실효 예정.
+          </div>
+          <ParamSlider label="FinBERT 감성 임계값" val={params.finBertThresh} min={-1} max={0} step={0.1} unit="" note="직전월 KOSPI 정규화 proxy — 현재 임계값에서 미작동 (KIS API 연동 후 실효)" pk="finBertThresh" setParams={ps}/>
+          <ParamSlider label="최소 뉴스 수" val={10} min={5} max={30} step={1} unit="개" note="실전 KIS API 연동 시 활성화 (현재 UI 표시 전용)" setParams={ps}/>
+        </div>
+
+        {/* ── L2 Trend & Pullback */}
+        <div className="bg-slate-800 rounded-xl p-4 border border-slate-700">
+          <div className="flex items-center gap-2 mb-3">
+            <span className="px-2 py-0.5 bg-blue-900 text-blue-200 rounded text-xs font-bold">L2</span>
+            <p className="text-xs font-bold text-slate-300">Trend & Pullback</p>
+          </div>
+          <ParamSlider label="ADX(14) 최소값" val={params.adx} min={20} max={45} step={5} unit="" note="강한 추세 기준" pk="adx" setParams={ps}/>
+          <ParamSlider label="RSI-2 진입 기준 (≤)" val={params.rsi2Entry} min={5} max={25} step={5} unit="" pk="rsi2Entry" setParams={ps}/>
+          <ParamSlider label="이격도 하한 SMA20" val={97} min={90} max={100} step={1} unit="%" note="시뮬 미반영 — UI 표시 전용" setParams={ps}/>
+        </div>
+
+        {/* ── L3 Volume Gate */}
+        <div className="bg-slate-800 rounded-xl p-4 border border-slate-700">
+          <div className="flex items-center gap-2 mb-3">
+            <span className="px-2 py-0.5 bg-emerald-900 text-emerald-200 rounded text-xs font-bold">L3</span>
+            <p className="text-xs font-bold text-slate-300">Volume Gate</p>
+            <span className="ml-auto text-[9px] px-1.5 py-0.5 bg-emerald-900/60 text-emerald-300 rounded">프록시 시뮬 반영</span>
+          </div>
+          <ParamSlider label="Vol Z-Score (≥)" val={params.zscore} min={1.5} max={3.5} step={0.5} unit="" note="신호 강도 임계값: 높을수록 강한 움직임만 진입" pk="zscore" setParams={ps}/>
+          <ParamSlider label="CVD 롤링 윈도우" val={params.cvdWin} min={30} max={90} step={15} unit="일" note={`매수/매도 압력 추적 기간 → ${Math.max(1,Math.round(params.cvdWin/15))}개월 lookback`} pk="cvdWin" setParams={ps}/>
+          <ParamSlider label="CVD 필터 강도" val={params.cvdCompare} min={3} max={10} step={1} unit="" note="매도 우위 판단 기준 (낮을수록 하락장 진입 차단 강화)" pk="cvdCompare" setParams={ps}/>
+        </div>
+
+        {/* ── L4 ML Approval */}
+        <div className="bg-slate-800 rounded-xl p-4 border border-slate-700">
+          <div className="flex items-center gap-2 mb-3">
+            <span className="px-2 py-0.5 bg-purple-900 text-purple-200 rounded text-xs font-bold">L4</span>
+            <p className="text-xs font-bold text-slate-300">ML Approval</p>
+          </div>
+          <ParamSlider label="XGBoost 임계값" val={params.mlThresh} min={60} max={80} step={5} unit="%" pk="mlThresh" setParams={ps}/>
+          <div className="p-2 bg-purple-900/20 rounded-lg border border-purple-800/40 text-[10px] text-purple-300 mb-2">
+            <span className="font-bold">[v10]</span> CalibratedClassifierCV(isotonic) 적용
+          </div>
+        </div>
+      </div>
+
+      {/* ── EXIT 전략 */}
+      <div className="bg-slate-800 rounded-xl p-4 border border-slate-700">
+        <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">EXIT 전략</p>
+        <div className="grid grid-cols-3 gap-5">
+
+          {/* 컬럼 1: Hard Stop + Time-Cut */}
+          <div>
+            <div className="mb-1 flex items-center justify-between">
+              <span className="text-xs text-slate-300">Hard Stop (%)</span>
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold text-indigo-300">{params.hardStop}%</span>
+                <span className="text-[9px] text-slate-500 bg-slate-700 px-1.5 py-0.5 rounded">
+                  ≈ {krw(-Math.round(CAPITAL_PER_SLOT * params.hardStop / 100))}
+                </span>
+              </div>
+            </div>
+            <input type="range" min={1} max={8} step={0.5} value={params.hardStop}
+              onChange={e => ps(p => ({ ...p, hardStop: +e.target.value }))}
+              className="w-full h-1.5 accent-indigo-500 bg-slate-700 rounded-full cursor-pointer mb-0.5"/>
+            <p className="text-[9px] text-emerald-400/90 mb-1 flex items-center gap-1">
+              <span>✓</span>종목별 ATR×{params.atrMult} 자동 적용 (UI 슬라이더는 fallback 기준)
+            </p>
+            <div className="mb-2 px-2 py-1.5 bg-emerald-900/20 border border-emerald-800/40 rounded-lg text-[9px] text-emerald-300 space-y-0.5">
+              <div className="font-bold text-emerald-400">✅ ATR 기반 종목별 손절 구현됨</div>
+              <div>① yfinance 실제 일봉 → 14일 ATR% (2026-03-20)</div>
+              <div>② Hard Stop = ATR × <span className="font-bold text-white">{params.atrMult}</span>  (min 1.5% / max 8.0%)</div>
+              <div>③ Look-ahead 없음: 당월 첫 거래일 이전 14일 기준</div>
+              <div className="text-slate-400 pt-0.5">삼성전자 ≈{(2.18*params.atrMult).toFixed(1)}% | 하이닉스 ≈{(3.49*params.atrMult).toFixed(1)}% | 카카오 ≈{(3.25*params.atrMult).toFixed(1)}%</div>
+            </div>
+
+            <div className="mb-1 flex items-center justify-between">
+              <span className="text-xs text-slate-300">ATR 배수 (×)</span>
+              <span className="text-xs font-bold text-emerald-300">{params.atrMult}×</span>
+            </div>
+            <input type="range" min={1.0} max={3.0} step={0.5} value={params.atrMult}
+              onChange={e => ps(p => ({ ...p, atrMult: +e.target.value }))}
+              className="w-full h-1.5 accent-emerald-500 bg-slate-700 rounded-full cursor-pointer mb-0.5"/>
+            <p className="text-[9px] text-slate-500 mb-3">
+              ★ 1.0×=타이트 손절  2.0×=표준  3.0×=여유 손절 (노이즈 차단)
+            </p>
+
+            <div className="mb-1 flex items-center justify-between">
+              <span className="text-xs text-slate-300">Time-Cut (거래일)</span>
+              <div className="flex items-center gap-2">
+                {params.timeCutOn && (
+                  <span className="text-xs font-bold text-indigo-300">{params.timeCut}일</span>
+                )}
+                <button
+                  onClick={() => ps(p => ({ ...p, timeCutOn: !p.timeCutOn }))}
+                  className={`relative w-8 h-4 rounded-full transition-colors flex-shrink-0 ${params.timeCutOn ? "bg-indigo-600" : "bg-slate-600"}`}>
+                  <span className={`absolute top-0.5 w-3 h-3 bg-white rounded-full shadow transition-all ${params.timeCutOn ? "left-4" : "left-0.5"}`}/>
+                </button>
+              </div>
+            </div>
+            <input type="range" min={5} max={30} step={1} value={params.timeCut}
+              disabled={!params.timeCutOn}
+              onChange={e => ps(p => ({ ...p, timeCut: +e.target.value }))}
+              className={`w-full h-1.5 accent-indigo-500 bg-slate-700 rounded-full mb-0.5 ${params.timeCutOn ? "cursor-pointer" : "cursor-not-allowed opacity-40"}`}/>
+            <p className="text-[9px] text-slate-500 mb-3">
+              {params.timeCutOn
+                ? `★ 최대 ${params.timeCut}거래일 경과 시 강제 청산`
+                : <span className="text-amber-600/80 flex items-center gap-1"><span>⚠</span>OFF — RSI-2·Hard Stop 신호로만 청산</span>
+              }
+            </p>
+          </div>
+
+          {/* 컬럼 2: Trailing */}
+          <div>
+            <ParamSlider label="Trailing 활성 기준" val={+(params.hardStop * 1.4).toFixed(1)}
+              min={2} max={10} step={0.5} unit="%"
+              reason={`Hard Stop(${params.hardStop}%) × 1.4 자동 산출 — 별도 조정 불가`}
+              setParams={ps}/>
+            <ParamSlider label="Trailing 폭" val={params.trailing} min={1} max={5} step={0.5} unit="%" pk="trailing" setParams={ps}
+              note="고점 대비 이 % 하락 시 청산"/>
+          </div>
+
+          {/* 컬럼 3: RSI */}
+          <div>
+            <ParamSlider label="RSI-2 즉시 청산 (≥)" val={params.rsi2Exit} min={80} max={99} step={5} unit="" pk="rsi2Exit" setParams={ps}
+              note="과매수 도달 → 즉시 전량 매도"/>
+            <ParamSlider label="RSI-14 분할매도 (≥)" val={70} min={60} max={85} step={5} unit=""
+              reason="개별 종목 모멘텀 연동 미구현 — 현재 고정값 70 사용"
+              setParams={ps}/>
+          </div>
+        </div>
+
+        {/* 청산 우선순위 */}
+        <div className="flex items-center gap-2 mt-3 flex-wrap">
+          <div className="grid grid-cols-6 gap-1.5 flex-1 text-[10px] text-center">
+            {[
+              ["1","Hard Stop","bg-red-900 text-red-300"],
+              ["2","갭다운","bg-red-800 text-red-300"],
+              ["3",`RSI-2≥${params.rsi2Exit}`,"bg-orange-900 text-orange-300"],
+              ["4","Trailing","bg-yellow-900 text-yellow-300"],
+              ["5","RSI-14≥70","bg-blue-900 text-blue-300"],
+              ["6","Time-Cut", params.timeCutOn ? "bg-slate-700 text-slate-300" : "bg-slate-800 text-slate-600 line-through"],
+            ].map(([p,l,c]) => (
+              <div key={p} className={`${c} rounded-lg py-1.5`}>
+                <div className="opacity-50 text-[9px]">{p}순위</div>
+                <div className="font-semibold">{l}</div>
+              </div>
+            ))}
+          </div>
+          {!params.timeCutOn && (
+            <span className="text-[10px] bg-amber-900/30 text-amber-400 border border-amber-700/50 px-2 py-1 rounded-lg">
+              ⚠ Time-Cut OFF
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* ── 파라미터 변경 검증 체크리스트 */}
+      <div className="bg-slate-800 rounded-xl p-4 border border-slate-700">
+        <div className="flex items-center gap-2 mb-2">
+          <span className="text-sm">📋</span>
+          <p className="text-xs font-bold text-slate-200 uppercase tracking-wider">파라미터 변경 검증 체크리스트</p>
+          <span className={`ml-auto text-[11px] font-bold px-2.5 py-0.5 rounded-full border ${
+            validationResults.passCount === validationResults.total
+              ? "bg-emerald-900/60 text-emerald-300 border-emerald-700"
+              : "bg-red-900/60 text-red-300 border-red-700 animate-pulse"
+          }`}>
+            {validationResults.passCount}/{validationResults.total} PASS
+          </span>
+        </div>
+        <p className="text-[10px] text-slate-500 mb-3">
+          설정 저장 전 <span className="text-slate-300 font-bold">상승·하락장 모두</span> 통과해야 합니다 — 파라미터 변경마다 자동 재계산됩니다.
+        </p>
+
+        <div className="space-y-1">
+          {validationResults.checks.map((c, idx) => {
+            const valStr = c.val === null ? "N/A"
+              : typeof c.val === "number" && c.label.includes("Sharpe") ? String(c.val)
+              : c.val >= 0 ? `+${c.val}%` : `${c.val}%`;
+            return (
+              <div key={idx} className={`flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[11px] transition-colors ${
+                c.pass
+                  ? "bg-emerald-950/40 border border-emerald-800/30"
+                  : "bg-red-950/50 border border-red-700/50"
+              }`}>
+                <span className="text-sm shrink-0">{c.pass ? "✅" : "❌"}</span>
+                <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold shrink-0 ${
+                  c.cat.includes("상승") ? "bg-emerald-900/60 text-emerald-400" :
+                  c.cat.includes("하락") ? "bg-red-900/60 text-red-400" :
+                  "bg-slate-700 text-slate-400"
+                }`}>{c.cat}</span>
+                <span className="text-slate-300 flex-1 min-w-0 truncate">{c.label}</span>
+                <span className={`font-bold shrink-0 ${c.pass ? "text-emerald-300" : "text-red-400"}`}>
+                  {valStr}
+                </span>
+                <span className="text-slate-600 text-[9px] shrink-0 hidden sm:block">{c.desc}</span>
+              </div>
+            );
+          })}
+        </div>
+
+        {validationResults.passCount === validationResults.total ? (
+          <div className="mt-3 p-2 bg-emerald-950/50 border border-emerald-700/50 rounded-lg text-[10px] text-emerald-300 flex items-center gap-2">
+            <span>✅</span>
+            <span><span className="font-bold text-emerald-200">전 항목 통과</span> — 상승·하락장 양방향 검증 완료. 설정 저장 가능합니다.</span>
+          </div>
+        ) : (
+          <div className="mt-3 p-2 bg-red-950/60 border border-red-700/50 rounded-lg text-[10px] text-red-300 flex items-center gap-2">
+            <span>⚠</span>
+            <span><span className="font-bold text-red-200">{validationResults.total - validationResults.passCount}개 항목 미통과</span> — 설정 저장 전 파라미터를 재검토하세요. 상승·하락장 한 쪽이 무너지는 설정입니다.</span>
+          </div>
+        )}
+      </div>
+
+      {/* ── 버튼 행 */}
+      <div className="flex gap-3">
+        <button onClick={handleRerun} disabled={rerunning}
+          className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-800 text-white text-sm font-semibold rounded-xl flex items-center justify-center gap-2">
+          {rerunning
+            ? <><svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="4"><circle cx="12" cy="12" r="10" strokeOpacity="0.3"/><path d="M12 2a10 10 0 0 1 10 10"/></svg>재실행 중…</>
+            : "🔄 백테스트 재실행"}
+        </button>
+        <button onClick={handleSave}
+          className={`flex-1 py-2.5 text-sm font-semibold rounded-xl transition-all ${saved ? "bg-emerald-700 text-emerald-200" : "bg-slate-700 hover:bg-slate-600 text-slate-200"}`}>
+          {saved ? "✅ 저장 완료!" : "💾 설정 저장"}
+        </button>
+        <button onClick={handleReset}
+          className="px-5 py-2.5 bg-slate-800 hover:bg-red-900/50 hover:border-red-700 hover:text-red-300 text-slate-400 text-sm rounded-xl border border-slate-600 transition-all"
+          title="모든 파라미터를 초기 기본값으로 복원">
+          🔁 기본값
+        </button>
+      </div>
+
+    </div>
+  );
+}
