@@ -6,15 +6,15 @@
 import { initializeApp } from "firebase/app";
 import { getFirestore } from "firebase/firestore";
 
-// ⚠ Firebase 콘솔에서 SMARTSWING_NH 앱 추가 후 아래 값을 교체한다
-// Console > aidash-d831b > 프로젝트 설정 > 앱 추가 > 웹
+// ✅ 2026-03-21 SMARTSWING_NH 앱 등록 완료 — config 적용
 const firebaseConfig = {
-  apiKey:            "REPLACE_AFTER_FIREBASE_APP_CREATED",
+  apiKey:            "AIzaSyCrcfv5AKFmNneeMrNuQpWq79YsEXQJk54",
   authDomain:        "aidash-d831b.firebaseapp.com",
   projectId:         "aidash-d831b",
-  storageBucket:     "aidash-d831b.appspot.com",
-  messagingSenderId: "REPLACE_AFTER_FIREBASE_APP_CREATED",
-  appId:             "REPLACE_AFTER_FIREBASE_APP_CREATED",
+  storageBucket:     "aidash-d831b.firebasestorage.app",
+  messagingSenderId: "718233578258",
+  appId:             "1:718233578258:web:35609f5513b306f14021cb",
+  measurementId:     "G-YMWR5RV7BH",
 };
 
 const app = initializeApp(firebaseConfig, "smartswing-nh"); // 2번째 인자: 앱 이름 (AI_DASHBOARD 와 충돌 방지)
