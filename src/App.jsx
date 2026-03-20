@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import TabBacktest from "./tabs/TabBacktest.jsx";
 import TabLiveSim  from "./tabs/TabLiveSim.jsx";
 import TabTrades   from "./tabs/TabTrades.jsx";
+import { DEFAULT_PARAMS } from "./backtest.js";
 
 // ── 탭 정의
 const TABS = [
@@ -12,6 +13,11 @@ const TABS = [
 
 export default function App() {
   const [tab, setTab] = useState(0);
+
+  // ── 백테스팅 파라미터 (App 레벨 관리 → TabBacktest/TabLiveSim 공유)
+  const [params, setParams]           = useState(DEFAULT_PARAMS);
+  const [period, setPeriod]           = useState("5년");
+  const [customRange, setCustomRange] = useState({ start: "21-03", end: "26-03" });
 
   return (
     <div className="min-h-screen bg-slate-900 text-white font-sans">
@@ -48,7 +54,16 @@ export default function App() {
 
       {/* ── 탭 컨텐츠 */}
       <main className="p-4 max-w-screen-xl mx-auto">
-        {tab === 0 && <TabBacktest />}
+        {tab === 0 && (
+          <TabBacktest
+            params={params}
+            setParams={setParams}
+            period={period}
+            setPeriod={setPeriod}
+            customRange={customRange}
+            setCustomRange={setCustomRange}
+          />
+        )}
         {tab === 1 && <TabLiveSim  />}
         {tab === 2 && <TabTrades   />}
       </main>
