@@ -2,18 +2,16 @@
 """
 SmartSwing-NH  ·  Daily 15:00 Telegram Alert
 ────────────────────────────────────────────
-• 장 열리는 평일(월~금, 공휴일 제외) 15:00 KST 실행
-• runBacktest 결과를 Telegram으로 전송
-• GitHub Actions에서 환경변수 주입:
-    TELEGRAM_BOT_TOKEN  — BotFather에서 발급받은 토큰
-    TELEGRAM_CHAT_ID    — /get_chat_id.py 로 확인한 숫자 ID
+• 평일(월~금) 15:00 KST 실행 (T-1 종가 기반 실제 신호)
+• pykrx로 전일 종가·RSI-2·ADX 수집 → 전략 규칙 적용 → Telegram 발송
+• T-1 기준: 오늘 15:00에 어제 종가로 오늘 진입 여부 판단 (퀀트 표준)
 """
 
 import os
-import json
-import math
 import datetime
 import requests
+import pandas as pd
+from pykrx import stock as pykrx_stock
 
 # ─────────────────────────────────────────────
 #  환경변수
@@ -22,174 +20,254 @@ BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
 
 # ─────────────────────────────────────────────
-#  GDB KPI (backtest.js와 동기화)
+#  GDB KPI (backtest.js 동기화)
 # ─────────────────────────────────────────────
 KPI = {
-    "1년": {"totalRet": 42.3,  "annRet": 42.3,  "mdd": -1.7,  "sharpe": 2.10, "winRate": 74},
-    "3년": {"totalRet": 183.2, "annRet": 41.0,  "mdd": -3.2,  "sharpe": 1.98, "winRate": 73},
-    "5년": {"totalRet": 1246.5,"annRet": 68.2,  "mdd": -1.7,  "sharpe": 2.23, "winRate": 75},
+    "1년": {"totalRet": 42.3,  "annRet": 42.3,  "mdd": -1.7},
+    "3년": {"totalRet": 183.2, "annRet": 41.0,  "mdd": -3.2},
+    "5년": {"totalRet": 1246.5,"annRet": 68.2,  "mdd": -1.7},
 }
 
-BASE_CAPITAL      = 50_000_000
-CAPITAL_PER_SLOT  = 10_000_000
-TRADE_COST_PCT    = 0.31 / 100
+CAPITAL_PER_SLOT = 10_000_000   # 슬롯당 1천만원
 
 # ─────────────────────────────────────────────
-#  DEFAULT_PARAMS (전략세팅탭 기본값)
+#  전략 파라미터 (Tab3 기본값과 동일)
 # ─────────────────────────────────────────────
-DEFAULT_PARAMS = {
-    "adx": 30, "rsi2Entry": 15, "zscore": 2.0, "mlThresh": 65,
-    "hardStop": 3.5, "atrMult": 2.0,
-    "timeCutOn": False, "timeCut": 10, "trailing": 4.0, "rsi2Exit": 99,
-    "finBertThresh": -0.3, "cvdWin": 60, "cvdCompare": 5,
+PARAMS = {
+    "adxMin":     30,    # ADX 최소값 (추세 필터)
+    "rsi2Entry":  15,    # RSI-2 진입 (과매도)
+    "rsi2Exit":   99,    # RSI-2 청산 (과매수)
+    "hardStop":   3.5,   # 하드스탑 (%)
+    "trailing":   4.0,   # 트레일링 스탑 (%)
 }
 
 # ─────────────────────────────────────────────
-#  간단한 오늘 신호 시뮬 (모의)
-#  실제 라이브 데이터가 없으므로 최신 GDB 지표 기반으로
-#  오늘의 상태를 요약한다.
+#  종목 풀 (GDB와 동일한 12종목, 슬롯 배분)
 # ─────────────────────────────────────────────
 STOCK_POOL = [
-    ("삼성전자",  "005930"),
-    ("SK하이닉스","000660"),
-    ("LG에너지솔루션","373220"),
-    ("삼성SDI",   "006400"),
-    ("현대차",    "005380"),
-    ("기아",      "000270"),
-    ("POSCO홀딩스","005490"),
-    ("NAVER",     "035420"),
-    ("카카오",    "035720"),
-    ("삼성바이오로직스","207940"),
-    ("KB금융",    "105560"),
-    ("신한지주",  "055550"),
+    ("삼성전자",        "005930", 1),
+    ("SK하이닉스",      "000660", 1),
+    ("LG에너지솔루션",  "373220", 2),
+    ("삼성SDI",         "006400", 2),
+    ("현대차",          "005380", 3),
+    ("기아",            "000270", 3),
+    ("POSCO홀딩스",     "005490", 4),
+    ("NAVER",           "035420", 4),
+    ("카카오",          "035720", 5),
+    ("삼성바이오로직스","207940", 5),
+    ("KB금융",          "105560", 1),
+    ("신한지주",        "055550", 2),
 ]
 
+# ─────────────────────────────────────────────
+#  KST 현재시각
+# ─────────────────────────────────────────────
 def get_today_kst():
     kst = datetime.timezone(datetime.timedelta(hours=9))
     return datetime.datetime.now(kst)
 
 def is_trading_day(dt):
-    """평일(월~금) 여부만 체크 — 공휴일은 별도 API 없으면 단순 제외"""
-    return dt.weekday() < 5  # 0=월 ~ 4=금
+    return dt.weekday() < 5   # 0=월 ~ 4=금
 
-def simulate_today_signals(today):
+# ─────────────────────────────────────────────
+#  pykrx 유틸
+# ─────────────────────────────────────────────
+def fetch_ohlcv(code: str, end_date: str, n_days: int = 30) -> pd.DataFrame:
     """
-    실제 라이브 데이터 없이 날짜 시드 기반 확률 모의.
-    실 운영 시에는 Firebase /udb/{yyyy-mm} 데이터를 읽어서 대체한다.
+    end_date 기준 최근 n_days 거래일 OHLCV.
+    end_date: "YYYYMMDD"
     """
-    import hashlib
-    seed = int(hashlib.md5(today.strftime("%Y%m%d").encode()).hexdigest(), 16)
+    end_dt   = datetime.datetime.strptime(end_date, "%Y%m%d")
+    start_dt = end_dt - datetime.timedelta(days=n_days * 2)
+    start_str = start_dt.strftime("%Y%m%d")
+    try:
+        df = pykrx_stock.get_market_ohlcv_by_date(start_str, end_date, code)
+        return df.tail(n_days)
+    except Exception as e:
+        print(f"  ⚠ {code} OHLCV 조회 실패: {e}")
+        return pd.DataFrame()
+
+def calc_rsi2(closes: pd.Series) -> float:
+    """RSI-2 계산 (최근 2일 평균 gain/loss)"""
+    if len(closes) < 3:
+        return 50.0
+    delta = closes.diff().dropna()
+    gain  = delta.clip(lower=0).tail(2).mean()
+    loss  = (-delta.clip(upper=0)).tail(2).mean()
+    if loss == 0:
+        return 100.0
+    rs = gain / loss
+    return round(100 - (100 / (1 + rs)), 2)
+
+def calc_adx(df: pd.DataFrame, period: int = 14) -> float:
+    """ADX(14) 계산"""
+    if len(df) < period + 2:
+        return 0.0
+    try:
+        high  = df["고가"]
+        low   = df["저가"]
+        close = df["종가"]
+        prev_close = close.shift(1)
+
+        tr = pd.concat([
+            high - low,
+            (high - prev_close).abs(),
+            (low  - prev_close).abs(),
+        ], axis=1).max(axis=1)
+
+        dm_plus  = high.diff()
+        dm_minus = (-low.diff())
+        dm_plus  = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0)
+        dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0)
+
+        atr  = tr.ewm(span=period, adjust=False).mean()
+        dip  = dm_plus.ewm(span=period, adjust=False).mean()  / atr * 100
+        dim  = dm_minus.ewm(span=period, adjust=False).mean() / atr * 100
+        dx   = ((dip - dim).abs() / (dip + dim) * 100).fillna(0)
+        adx  = dx.ewm(span=period, adjust=False).mean()
+        return round(float(adx.iloc[-1]), 1)
+    except Exception:
+        return 0.0
+
+# ─────────────────────────────────────────────
+#  실제 신호 생성 (T-1 종가 기준)
+# ─────────────────────────────────────────────
+def get_real_signals(today: datetime.datetime):
+    """
+    T-1(전일) 종가 기준 실제 매수/청산 신호 생성.
+    • 매수:    RSI-2 ≤ 15  AND  ADX ≥ 30
+    • 청산후보: RSI-2 ≥ 99
+    """
+    # T-1 날짜 계산 (주말 보정)
+    t1 = today - datetime.timedelta(days=1)
+    while t1.weekday() >= 5:
+        t1 -= datetime.timedelta(days=1)
+    t1_str = t1.strftime("%Y%m%d")
+    print(f"  T-1 날짜: {t1_str}")
 
     signals = []
-    holds   = []
+    exits   = []
+    skipped = []
 
-    for i, (name, code) in enumerate(STOCK_POOL):
-        h = (seed >> i) & 0xFF
-        # 매수 신호 (약 20% 확률)
-        if h < 50:
-            price = 50000 + (h * 3000)
-            slot  = (i % 5) + 1
-            qty   = int(CAPITAL_PER_SLOT / price)   # 수량 = 슬롯자금 / 진입가
+    for name, code, slot in STOCK_POOL:
+        df = fetch_ohlcv(code, t1_str, n_days=30)
+
+        if df.empty or len(df) < 5:
+            skipped.append(f"{name}({code})")
+            continue
+
+        close_t1 = float(df["종가"].iloc[-1])
+        rsi2     = calc_rsi2(df["종가"])
+        adx      = calc_adx(df)
+
+        print(f"  {name}({code}): 종가={close_t1:,.0f}  RSI-2={rsi2}  ADX={adx}")
+
+        # 매수 신호: 과매도 + 추세 확인
+        if rsi2 <= PARAMS["rsi2Entry"] and adx >= PARAMS["adxMin"]:
+            qty = int(CAPITAL_PER_SLOT / close_t1) if close_t1 > 0 else 0
             signals.append({
-                "type": "매수", "name": name, "code": code,
-                "slot": slot, "price": price, "qty": qty
+                "name": name, "code": code, "slot": slot,
+                "price": close_t1, "qty": qty,
+                "rsi2": rsi2, "adx": adx,
             })
-        # 보유 + 매도 신호 (약 15% 확률)
-        elif h < 88:
-            ret_pct  = round((h - 50) / 10, 1)
-            ret_krw  = int(CAPITAL_PER_SLOT * ret_pct / 100)
-            holds.append({
-                "name": name, "ret_pct": ret_pct, "ret_krw": ret_krw,
-                "exit": "RSI-2≥99" if ret_pct > 3 else "Trailing"
+        # 청산 후보: 과매수
+        elif rsi2 >= PARAMS["rsi2Exit"]:
+            exits.append({
+                "name": name, "code": code, "rsi2": rsi2, "exit": "RSI-2≥99",
             })
 
-    return signals, holds
+    if skipped:
+        print(f"  ⚠ 데이터 없음: {', '.join(skipped)}")
 
-def build_message(today, signals, holds):
-    """HTML 모드 메시지 포맷 (MarkdownV2 이스케이프 문제 없음)"""
+    return signals, exits, t1_str
+
+# ─────────────────────────────────────────────
+#  메시지 빌드
+# ─────────────────────────────────────────────
+def build_message(today, signals, exits, t1_str):
     date_str = today.strftime("%Y-%m-%d")
     time_str = today.strftime("%H:%M")
 
     lines = [
         f"📊 <b>SmartSwing-NH</b>  <code>{date_str}  {time_str}</code>",
+        f"<i>기준: T-1 종가 ({t1_str})</i>",
         "",
     ]
 
-    # 오늘 신호
-    lines.append("<b>[오늘 신호]</b>")
+    # 매수 신호
+    lines.append("<b>[ 오늘 매수 신호 ]</b>")
     if signals:
         for s in signals:
-            price_fmt = f"₩{s['price']:,}"
-            amt_fmt   = f"₩{s['price'] * s['qty']:,}"
+            price_fmt = f"₩{s['price']:,.0f}"
+            amt_fmt   = f"₩{s['price'] * s['qty']:,.0f}"
             lines.append(
                 f"▲ 매수  {s['name']}({s['code']})  슬롯{s['slot']}\n"
-                f"   진입가 {price_fmt}  ×  {s['qty']}주  =  {amt_fmt}"
+                f"   진입가 {price_fmt}  ×  {s['qty']}주  =  {amt_fmt}\n"
+                f"   RSI-2={s['rsi2']}  ADX={s['adx']}"
             )
     else:
-        lines.append("─ 신호 없음")
+        lines.append("─ 매수 신호 없음")
     lines.append("")
 
-    # 보유 현황
-    lines.append("<b>[보유 현황]</b>")
-    if holds:
-        for h in holds:
-            sign = "+" if h["ret_pct"] >= 0 else ""
-            lines.append(
-                f"▼ 매도  {h['name']}  {sign}{h['ret_pct']}%  "
-                f"{sign}₩{abs(h['ret_krw']):,}  {h['exit']}"
-            )
+    # 청산 후보
+    lines.append("<b>[ 청산 후보 (RSI-2 과매수) ]</b>")
+    if exits:
+        for e in exits:
+            lines.append(f"⬇ {e['name']}({e['code']})  RSI-2={e['rsi2']}  → {e['exit']}")
     else:
-        lines.append("─ 보유 종목 없음")
+        lines.append("─ 없음")
     lines.append("")
 
-    # 누적 P&L
-    kpi_5y = KPI["5년"]
-    lines.append("<b>[누적 P&L]</b>")
+    # KPI
+    kpi = KPI["5년"]
+    lines.append("<b>[ 5년 누적 KPI ]</b>")
     lines.append(
-        f"5년 누적  +{kpi_5y['totalRet']}%  |  "
-        f"연환산 +{kpi_5y['annRet']}%  |  "
-        f"MDD {kpi_5y['mdd']}%"
+        f"+{kpi['totalRet']}%  연환산 +{kpi['annRet']}%  MDD {kpi['mdd']}%"
     )
     lines.append("")
 
-    # 파라미터 요약
-    p = DEFAULT_PARAMS
+    # 파라미터
+    p = PARAMS
     lines.append(
-        f"⚙️ <code>rsi2Exit={p['rsi2Exit']}  trailing={p['trailing']}%  "
-        f"hardStop={p['hardStop']}%  adx={p['adx']}</code>"
+        f"⚙️ <code>RSI진입≤{p['rsi2Entry']} 청산≥{p['rsi2Exit']} "
+        f"ADX≥{p['adxMin']} TS={p['trailing']}% HS={p['hardStop']}%</code>"
     )
 
     return "\n".join(lines)
 
-def send_telegram(text):
+# ─────────────────────────────────────────────
+#  Telegram 전송
+# ─────────────────────────────────────────────
+def send_telegram(text: str):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id":    CHAT_ID,
-        "text":       text,
-        "parse_mode": "HTML",
-    }
-    r = requests.post(url, json=payload, timeout=10)
+    payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
+    r = requests.post(url, json=payload, timeout=15)
     r.raise_for_status()
     return r.json()
 
+# ─────────────────────────────────────────────
+#  메인
+# ─────────────────────────────────────────────
 def main():
     today = get_today_kst()
-    print(f"[{today.isoformat()}] SmartSwing-NH 알림 실행")
+    print(f"[{today.isoformat()}] SmartSwing-NH 실시간 알림 실행")
 
-    # 환경변수 FORCE_RUN=1 이면 주말도 강제 실행 (테스트용)
-    if not is_trading_day(today) and not os.environ.get("FORCE_RUN"):
+    force = bool(os.environ.get("FORCE_RUN"))
+    if not is_trading_day(today) and not force:
         print("주말 — 알림 건너뜀")
         return
 
-    signals, holds = simulate_today_signals(today)
-    msg = build_message(today, signals, holds)
+    print("📡 pykrx 실시간 데이터 수집 중...")
+    signals, exits, t1_str = get_real_signals(today)
+
+    msg = build_message(today, signals, exits, t1_str)
     print("─── 전송 메시지 ───")
     print(msg)
     print("──────────────────")
 
     result = send_telegram(msg)
     if result.get("ok"):
-        print("✅ Telegram 전송 성공")
+        print(f"✅ Telegram 전송 성공  (매수신호 {len(signals)}개, 청산후보 {len(exits)}개)")
     else:
         print(f"❌ 전송 실패: {result}")
 
