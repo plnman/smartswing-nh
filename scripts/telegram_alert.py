@@ -89,9 +89,10 @@ def simulate_today_signals(today):
         if h < 50:
             price = 50000 + (h * 3000)
             slot  = (i % 5) + 1
+            qty   = int(CAPITAL_PER_SLOT / price)   # 수량 = 슬롯자금 / 진입가
             signals.append({
                 "type": "매수", "name": name, "code": code,
-                "slot": slot, "price": price
+                "slot": slot, "price": price, "qty": qty
             })
         # 보유 + 매도 신호 (약 15% 확률)
         elif h < 88:
@@ -119,8 +120,10 @@ def build_message(today, signals, holds):
     if signals:
         for s in signals:
             price_fmt = f"₩{s['price']:,}"
+            amt_fmt   = f"₩{s['price'] * s['qty']:,}"
             lines.append(
-                f"▲ 매수  {s['name']}({s['code']})  슬롯{s['slot']}  진입가 {price_fmt}"
+                f"▲ 매수  {s['name']}({s['code']})  슬롯{s['slot']}\n"
+                f"   진입가 {price_fmt}  ×  {s['qty']}주  =  {amt_fmt}"
             )
     else:
         lines.append("─ 신호 없음")
