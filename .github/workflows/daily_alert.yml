@@ -1,21 +1,35 @@
 # ══════════════════════════════════════════════════════════════
-#  SmartSwing-NH  ·  Daily 15:00 KST Telegram Alert
-#  GitHub Actions — 평일(월~금) 한국시간 15:00 = UTC 06:00
+#  SmartSwing-NH  ·  Daily Automation (KST)
+#
+#  Job 1 — send-alert  : 15:00 KST (UTC 06:00)  Telegram 알림
+#  Job 2 — update-udb  : 15:40 KST (UTC 06:40)  Firebase UDB 저장
+#
+#  평일(월~금) 자동 실행 / workflow_dispatch로 수동 강제 실행 가능
 # ══════════════════════════════════════════════════════════════
-name: Daily Alert (15:00 KST)
+name: Daily Automation (15:00 + 15:40 KST)
 
 on:
   schedule:
-    # UTC 06:00 = KST 15:00 (월~금)
+    # Job 1: UTC 06:00 = KST 15:00 (월~금)
     - cron: "0 6 * * 1-5"
+    # Job 2: UTC 06:40 = KST 15:40 (월~금)
+    - cron: "40 6 * * 1-5"
 
-  # 수동 실행 버튼 (테스트용)
+  # 수동 실행 버튼 (테스트용 — 두 Job 모두 강제 실행)
   workflow_dispatch:
 
+# ──────────────────────────────────────────────
+#  Job 1: Telegram 알림 (15:00 KST)
+# ──────────────────────────────────────────────
 jobs:
   send-alert:
+    name: "📨 15:00 Telegram 알림"
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # schedule 트리거일 때: 06:00 cron만 실행 (06:40은 건너뜀)
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'schedule' && github.event.schedule == '0 6 * * 1-5')
 
     steps:
       - name: Checkout
@@ -36,3 +50,35 @@ jobs:
           # 수동(workflow_dispatch) 실행 시 주말도 강제 전송
           FORCE_RUN: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}
         run: python3 scripts/telegram_alert.py
+
+  # ──────────────────────────────────────────────
+  #  Job 2: Firebase UDB 업데이트 (15:40 KST)
+  # ──────────────────────────────────────────────
+  update-udb:
+    name: "🔄 15:40 Firebase UDB 업데이트"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # schedule 트리거일 때: 06:40 cron만 실행 (06:00은 건너뜀)
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'schedule' && github.event.schedule == '40 6 * * 1-5')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python 설치
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 의존성 설치
+        run: |
+          pip install pykrx firebase-admin requests
+
+      - name: 15:40 KST Firebase UDB 업데이트
+        env:
+          FIREBASE_CREDENTIALS: ${{ secrets.FIREBASE_CREDENTIALS }}
+          # 수동 실행 시 당월 강제 업데이트
+          FORCE_RUN: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}
+        run: python3 scripts/update_udb.py
