@@ -105,29 +105,29 @@ def simulate_today_signals(today):
     return signals, holds
 
 def build_message(today, signals, holds):
-    """합의된 메시지 형식으로 포맷"""
+    """HTML 모드 메시지 포맷 (MarkdownV2 이스케이프 문제 없음)"""
     date_str = today.strftime("%Y-%m-%d")
     time_str = today.strftime("%H:%M")
 
     lines = [
-        f"📊 *SmartSwing\\-NH*  `{date_str}  {time_str}`",
+        f"📊 <b>SmartSwing-NH</b>  <code>{date_str}  {time_str}</code>",
         "",
     ]
 
     # 오늘 신호
-    lines.append("*\\[오늘 신호\\]*")
+    lines.append("<b>[오늘 신호]</b>")
     if signals:
         for s in signals:
             price_fmt = f"₩{s['price']:,}"
             lines.append(
-                f"▲ 매수  {s['name']}\\({s['code']}\\)  슬롯{s['slot']}  진입가 {price_fmt}"
+                f"▲ 매수  {s['name']}({s['code']})  슬롯{s['slot']}  진입가 {price_fmt}"
             )
     else:
         lines.append("─ 신호 없음")
     lines.append("")
 
     # 보유 현황
-    lines.append("*\\[보유 현황\\]*")
+    lines.append("<b>[보유 현황]</b>")
     if holds:
         for h in holds:
             sign = "+" if h["ret_pct"] >= 0 else ""
@@ -141,10 +141,10 @@ def build_message(today, signals, holds):
 
     # 누적 P&L
     kpi_5y = KPI["5년"]
-    lines.append("*\\[누적 P&L\\]*")
+    lines.append("<b>[누적 P&L]</b>")
     lines.append(
-        f"5년 누적  \\+{kpi_5y['totalRet']}%  \\|  "
-        f"연환산 \\+{kpi_5y['annRet']}%  \\|  "
+        f"5년 누적  +{kpi_5y['totalRet']}%  |  "
+        f"연환산 +{kpi_5y['annRet']}%  |  "
         f"MDD {kpi_5y['mdd']}%"
     )
     lines.append("")
@@ -152,8 +152,8 @@ def build_message(today, signals, holds):
     # 파라미터 요약
     p = DEFAULT_PARAMS
     lines.append(
-        f"⚙️ `rsi2Exit={p['rsi2Exit']}  trailing={p['trailing']}%  "
-        f"hardStop={p['hardStop']}%  adx={p['adx']}`"
+        f"⚙️ <code>rsi2Exit={p['rsi2Exit']}  trailing={p['trailing']}%  "
+        f"hardStop={p['hardStop']}%  adx={p['adx']}</code>"
     )
 
     return "\n".join(lines)
@@ -163,7 +163,7 @@ def send_telegram(text):
     payload = {
         "chat_id":    CHAT_ID,
         "text":       text,
-        "parse_mode": "MarkdownV2",
+        "parse_mode": "HTML",
     }
     r = requests.post(url, json=payload, timeout=10)
     r.raise_for_status()
