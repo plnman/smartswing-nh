@@ -2,7 +2,10 @@
 // backtest.js — GDB 전체 데이터 + 백테스팅 엔진 (GDB 동결)
 // SmartSwing_Dashboard_v3.jsx의 Tab1 데이터 완전 이식
 // GDB 동결: 2026-03-21 / KOSPI200 2021-01~2026-03 기준
+// v2.0: KOSPI200 200종목 실제 월간 수익률 기반 백테스트
 // ════════════════════════════════════════════════════════════
+
+import { GDB_STOCK_POOL, GDB_STOCK_MONTHLY } from "./gdb_stocks.js";
 
 // 전체 월별 누적곡선 (기준 2021-01 = 100)
 export const EQUITY_CURVE_RAW = [
@@ -158,11 +161,13 @@ export const STOCK_ATR = {
   "402340": {"22-01":4.48,"22-02":4.753,"22-03":3.987,"22-04":2.436,"22-05":2.696,"22-06":2.817,"22-07":4.227,"22-08":2.524,"22-09":2.692,"22-10":4.012,"22-11":3.226,"22-12":2.686,"23-01":2.453,"23-02":2.358,"23-03":3.296,"23-04":3.15,"23-05":3.429,"23-06":2.538,"23-07":3.249,"23-08":3.501,"23-09":3.062,"23-10":3.822,"23-11":3.438,"23-12":3.335,"24-01":2.453,"24-02":2.832,"24-03":5.088,"24-04":4.447,"24-05":6.276,"24-06":4.384,"24-07":5.423,"24-08":6.285,"24-09":5.314,"24-10":6.366,"24-11":5.551,"24-12":6.202,"25-01":4.308,"25-02":5.406,"25-03":4.612,"25-04":4.079,"25-05":3.427,"25-06":4.465,"25-07":6.05,"25-08":4.974,"25-09":4.576,"25-10":5.106,"25-11":7.143,"25-12":6.546,"26-01":4.783,"26-02":6.252,"26-03":7.131},
 };
 
-// ATR 기반 종목별 hardStop 계산 헬퍼
-export const getStockHardStop = (stockCode, yyyyMM, atrMult = 2.0) => {
-  const atrMap = STOCK_ATR[stockCode];
-  if (!atrMap) return 3.5;
-  const atrPct = atrMap[yyyyMM];
+// ATR 기반 종목별 hardStop 계산 헬퍼 (GDB_STOCK_MONTHLY 우선, 폴백 STOCK_ATR)
+export const getStockHardStop = (stockCode, yyyyMM, atrMult = 2.0, atrOverride = null) => {
+  // atrOverride: live ATR map (UDB 월 사용 시)
+  const liveAtr = atrOverride?.[stockCode]?.[yyyyMM];
+  const gdbAtr  = GDB_STOCK_MONTHLY[stockCode]?.[yyyyMM]?.atr;
+  const legacyAtr = STOCK_ATR[stockCode]?.[yyyyMM];
+  const atrPct = liveAtr ?? gdbAtr ?? legacyAtr;
   if (atrPct == null) return 3.5;
   return +Math.min(8.0, Math.max(1.5, atrPct * atrMult)).toFixed(2);
 };
@@ -183,14 +188,6 @@ export function runBacktest(period, params, customRange = null) {
   }
   const base = raw[0].k;
 
-  const upMult = +(2.1
-    + (params.adx      - 30) * 0.02
-    + (params.mlThresh - 65) * 0.01
-  ).toFixed(3);
-  const dnMult = +Math.max(0.12,
-    0.35 - (3.5 - params.hardStop) * 0.04
-  ).toFixed(3);
-
   const startIdx = ALL_MONTHLY.length - (nMonths - 1);
   const monthly  = ALL_MONTHLY.slice(Math.max(0, startIdx));
 
@@ -204,6 +201,14 @@ export function runBacktest(period, params, customRange = null) {
   monthly.forEach((m, i) => {
     const absR = Math.abs(m.r);
     if (absR < sigThresh) return;
+
+    const yy = String(m.year).slice(2);
+    const mm = String(m.month).padStart(2, "0");
+    const ym = `${yy}-${mm}`;
+
+    // ★ 해당 월에 실제 데이터가 있는 종목만 사용 (상장 전 종목 자동 제외)
+    const availableStocks = GDB_STOCK_POOL.filter(s => GDB_STOCK_MONTHLY[s.code]?.[ym] !== undefined);
+    if (availableStocks.length === 0) return;
 
     for (let slot = 0; slot < NSLOTS; slot++) {
       const seed = (m.month * 17 + (m.year % 100) * 31 + i * 7 + slot * 37) % 100;
@@ -224,8 +229,10 @@ export function runBacktest(period, params, customRange = null) {
         if (netCVD <= cvdGate && m.r < 0) continue;
       }
 
-      const stockSeed = (seed * 13 + m.month * 7 + (m.year % 10) * 31 + slot * 11) % STOCK_POOL.length;
-      const stock     = STOCK_POOL[stockSeed];
+      // ★ 실제 상장 종목 중에서 배정
+      const stockSeed = (seed * 13 + m.month * 7 + (m.year % 10) * 31 + slot * 11) % availableStocks.length;
+      const stock     = availableStocks[stockSeed];
+
       const entryDay  = 3 + (seed % 22);
       const rawHoldBase = 15 + ((seed * 2) % 10);
       const prevR       = i > 0 ? monthly[i - 1].r : 0;
@@ -233,8 +240,6 @@ export function runBacktest(period, params, customRange = null) {
       const rawHold     = Math.min(25, rawHoldBase + momentumBonus);
       const holdDays    = params.timeCutOn ? Math.min(params.timeCut, rawHold) : rawHold;
       const totalDay  = entryDay + holdDays;
-      const yy = String(m.year).slice(2);
-      const mm = String(m.month).padStart(2, "0");
       const entry = `${yy}-${mm}-${String(entryDay).padStart(2, "0")}`;
 
       let exit;
@@ -252,29 +257,26 @@ export function runBacktest(period, params, customRange = null) {
       const crossMonth = totalDay > 28 && (i + 1 < monthly.length);
       let ret;
       if (crossMonth) {
-        const nextM     = monthly[i + 1];
+        // ★ 크로스월: 당월 + 익월 실제 종목 수익률로 일수 비례 계산
+        const nextM  = monthly[i + 1];
+        const nxtYY  = String(nextM.year).slice(2);
+        const nxtMM  = String(nextM.month).padStart(2, "0");
+        const nxtYM  = `${nxtYY}-${nxtMM}`;
         const daysEntry = 28 - entryDay;
         const daysExit  = holdDays - daysEntry;
         const fEntry    = daysEntry / holdDays;
         const fExit     = daysExit  / holdDays;
-        const calcBase  = (r) =>
-          r >= 5  ? r * (upMult * 0.9)  :
-          r >= 2  ? r * (upMult * 0.7)  :
-          r >= 0  ? r * 1.1             :
-          r >= -4 ? r * dnMult          : r * dnMult;
-        ret = +(calcBase(m.r) * fEntry + calcBase(nextM.r) * fExit + (seed % 5) * 0.2).toFixed(1);
+        const stockRetEntry = GDB_STOCK_MONTHLY[stock.code]?.[ym]?.r   ?? m.r;
+        const stockRetExit  = GDB_STOCK_MONTHLY[stock.code]?.[nxtYM]?.r ?? nextM.r;
+        ret = +(stockRetEntry * fEntry + stockRetExit * fExit).toFixed(1);
       } else {
+        // ★ 단일월: 실제 종목 수익률 × 보유기간 비율
         const participation = Math.min(holdDays / 20, 1.0);
-        let baseRet;
-        if      (m.r >= 5)  baseRet = m.r * (upMult * 0.9) + (seed % 5) * 0.3;
-        else if (m.r >= 2)  baseRet = m.r * (upMult * 0.7) + (seed % 4) * 0.2;
-        else if (m.r >= 0)  baseRet = m.r * 1.1 + 0.4;
-        else if (m.r >= -4) baseRet = m.r * dnMult - 0.2;
-        else                baseRet = m.r * dnMult;
-        ret = +(baseRet * participation).toFixed(1);
+        const stockRet = GDB_STOCK_MONTHLY[stock.code]?.[ym]?.r ?? m.r;
+        ret = +(stockRet * participation).toFixed(1);
       }
 
-      const stockHardStop = getStockHardStop(stock.code, `${yy}-${mm}`, params.atrMult);
+      const stockHardStop = getStockHardStop(stock.code, ym, params.atrMult);
       ret = Math.max(ret, -(stockHardStop + 0.3));
       ret = Math.min(ret, params.trailing * 7 + 5);
       ret = +(ret - TRADE_COST_PCT).toFixed(1);
@@ -370,11 +372,14 @@ export function buildLiveEquityCurve(udbDocs = []) {
 export function buildLiveStockATR(udbDocs = []) {
   const GDB_LAST = "26-03";
   const extended = {};
-  // GDB 값 복사
-  Object.keys(STOCK_ATR).forEach(code => {
-    extended[code] = { ...STOCK_ATR[code] };
+  // GDB_STOCK_MONTHLY ATR 복사 (200종목 전체)
+  Object.entries(GDB_STOCK_MONTHLY).forEach(([code, months]) => {
+    extended[code] = {};
+    Object.entries(months).forEach(([ym, val]) => {
+      if (val?.atr != null) extended[code][ym] = val.atr;
+    });
   });
-  // UDB 신규 달 추가
+  // UDB 신규 달 추가 (GDB_LAST 이후 실시간 데이터)
   udbDocs
     .filter(u => u.date && u.date > GDB_LAST && u.stocks)
     .forEach(u => {
@@ -466,14 +471,6 @@ export function runBacktestLive(period, params, customRange = null, liveData = n
   }
   const base = raw[0].k;
 
-  const upMult = +(2.1
-    + (params.adx      - 30) * 0.02
-    + (params.mlThresh - 65) * 0.01
-  ).toFixed(3);
-  const dnMult = +Math.max(0.12,
-    0.35 - (3.5 - params.hardStop) * 0.04
-  ).toFixed(3);
-
   const startIdx = _monthly.length - (nMonths - 1);
   const monthly  = _monthly.slice(Math.max(0, startIdx));
 
@@ -505,8 +502,11 @@ export function runBacktestLive(period, params, customRange = null, liveData = n
         if (netCVD <= cvdGate && m.r < 0) continue;
       }
 
-      const stockSeed = (seed * 13 + m.month * 7 + (m.year % 10) * 31 + slot * 11) % STOCK_POOL.length;
-      const stock     = STOCK_POOL[stockSeed];
+      const ym = `${String(m.year).slice(2)}-${String(m.month).padStart(2, "0")}`;
+      const availableStocks = GDB_STOCK_POOL.filter(s => GDB_STOCK_MONTHLY[s.code]?.[ym] !== undefined);
+      const stockPool = availableStocks.length > 0 ? availableStocks : GDB_STOCK_POOL;
+      const stockSeed = (seed * 13 + m.month * 7 + (m.year % 10) * 31 + slot * 11) % stockPool.length;
+      const stock     = stockPool[stockSeed];
       const entryDay  = 3 + (seed % 22);
       const rawHoldBase = 15 + ((seed * 2) % 10);
       const prevR       = i > 0 ? monthly[i - 1].r : 0;
@@ -532,33 +532,26 @@ export function runBacktestLive(period, params, customRange = null, liveData = n
       const crossMonth = totalDay > 28 && (i + 1 < monthly.length);
       let ret;
       if (crossMonth) {
-        const nextM  = monthly[i + 1];
+        const nextM   = monthly[i + 1];
+        const nxtYM   = `${String(nextM.year).slice(2)}-${String(nextM.month).padStart(2, "0")}`;
         const daysEntry = 28 - entryDay;
         const daysExit  = holdDays - daysEntry;
         const fEntry    = daysEntry / holdDays;
         const fExit     = daysExit  / holdDays;
-        const calcBase  = (r) =>
-          r >= 5  ? r * (upMult * 0.9) :
-          r >= 2  ? r * (upMult * 0.7) :
-          r >= 0  ? r * 1.1 :
-          r >= -4 ? r * dnMult : r * dnMult;
-        ret = +(calcBase(m.r) * fEntry + calcBase(nextM.r) * fExit + (seed % 5) * 0.2).toFixed(1);
+        const stockRetEntry = GDB_STOCK_MONTHLY[stock.code]?.[ym]?.r  ?? m.r;
+        const stockRetExit  = GDB_STOCK_MONTHLY[stock.code]?.[nxtYM]?.r ?? nextM.r;
+        ret = +(stockRetEntry * fEntry + stockRetExit * fExit).toFixed(1);
       } else {
         const participation = Math.min(holdDays / 20, 1.0);
-        let baseRet;
-        if      (m.r >= 5)  baseRet = m.r * (upMult * 0.9) + (seed % 5) * 0.3;
-        else if (m.r >= 2)  baseRet = m.r * (upMult * 0.7) + (seed % 4) * 0.2;
-        else if (m.r >= 0)  baseRet = m.r * 1.1 + 0.4;
-        else if (m.r >= -4) baseRet = m.r * dnMult - 0.2;
-        else                baseRet = m.r * dnMult;
-        ret = +(baseRet * participation).toFixed(1);
+        const stockRet = GDB_STOCK_MONTHLY[stock.code]?.[ym]?.r ?? m.r;
+        ret = +(stockRet * participation).toFixed(1);
       }
 
-      // _atr 파라미터 사용 (live ATR)
+      // ATR 우선순위: live(_atr) > GDB_STOCK_MONTHLY > 기본값 3.5
       const getStockHS = (code, yyyyMM, mult) => {
-        const atrMap = _atr[code];
-        if (!atrMap) return 3.5;
-        const atrPct = atrMap[yyyyMM];
+        const liveAtr = _atr?.[code]?.[yyyyMM];
+        const gdbAtr  = GDB_STOCK_MONTHLY[code]?.[yyyyMM]?.atr;
+        const atrPct  = liveAtr ?? gdbAtr;
         if (atrPct == null) return 3.5;
         return +Math.min(8.0, Math.max(1.5, atrPct * mult)).toFixed(2);
       };
