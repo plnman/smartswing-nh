@@ -8,6 +8,7 @@ SmartSwing-NH  ·  Daily 15:00 Telegram Alert
 """
 
 import os
+import json
 import datetime
 import requests
 import pandas as pd
@@ -236,6 +237,44 @@ def build_message(today, signals, exits, t1_str):
     return "\n".join(lines)
 
 # ─────────────────────────────────────────────
+#  Firebase /daily/{YYYYMMDD} 저장
+# ─────────────────────────────────────────────
+def save_to_firebase(today_str: str, signals: list, exits: list, t1_str: str):
+    """
+    Firebase Firestore /daily/{YYYYMMDD} 에 오늘 신호 저장.
+    TabLiveSim 탭에서 실시간 신호를 읽어 보여주는 데 사용.
+    FIREBASE_CREDENTIALS 없으면 조용히 건너뜀.
+    """
+    cred_json = os.environ.get("FIREBASE_CREDENTIALS")
+    if not cred_json:
+        print("  ⚠ FIREBASE_CREDENTIALS 없음 — Firebase 저장 건너뜀")
+        return
+
+    try:
+        import firebase_admin
+        from firebase_admin import credentials as fb_cred, firestore as fb_fs
+
+        if not firebase_admin._apps:
+            cred = fb_cred.Certificate(json.loads(cred_json))
+            firebase_admin.initialize_app(cred)
+
+        db = fb_fs.client()
+
+        # exits 리스트의 'exit' 키 이름 충돌 방지 (Python 예약어 아님, 안전)
+        db.collection("daily").document(today_str).set({
+            "signals":  signals,
+            "exits":    exits,
+            "t1_date":  t1_str,
+            "run_at":   datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "date":     f"{today_str[:4]}-{today_str[4:6]}-{today_str[6:]}",
+        })
+        print(f"  ✅ Firebase /daily/{today_str} 저장 완료")
+
+    except Exception as e:
+        print(f"  ⚠ Firebase 저장 실패 (비치명적): {e}")
+
+
+# ─────────────────────────────────────────────
 #  Telegram 전송
 # ─────────────────────────────────────────────
 def send_telegram(text: str):
@@ -270,6 +309,10 @@ def main():
         print(f"✅ Telegram 전송 성공  (매수신호 {len(signals)}개, 청산후보 {len(exits)}개)")
     else:
         print(f"❌ 전송 실패: {result}")
+
+    # Firebase /daily/{YYYYMMDD} 저장 (TabLiveSim 탭에서 읽음)
+    today_str = today.strftime("%Y%m%d")
+    save_to_firebase(today_str, signals, exits, t1_str)
 
 if __name__ == "__main__":
     main()

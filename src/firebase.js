@@ -26,8 +26,9 @@ export const db = getFirestore(app);
 // 거래  : /trades/{id}           — 실제 수동 거래 기록 (사용자 입력)
 // 포트  : /portfolio/snapshot    — 누적 수익률 스냅샷
 export const COL = {
-  UDB:       "udb",
-  SIGNALS:   "signals",
-  TRADES:    "trades",
-  PORTFOLIO: "portfolio",
+  UDB:      "udb",       // /udb/{yy-mm}          — 월별 KOSPI 집계 (UDB)
+  DAILY:    "daily",     // /daily/{YYYYMMDD}      — 일별 실제 pykrx 신호
+  HOLDINGS: "holdings",  // /holdings/{code}       — 현재 보유 포지션 (수동 등록)
+  SIGNALS:  "signals",   // 구버전 호환 유지
+  TRADES:   "trades",    // /trades/{id}           — 거래 기록
 };

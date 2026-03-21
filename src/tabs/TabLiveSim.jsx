@@ -1,332 +1,520 @@
 // ════════════════════════════════════════════════════════════════════════
-// TabLiveSim — 실시간 시뮬 탭
-// 매일 15:00 KST: GDB + UDB 합산 시뮬 → 매수/매도 제안 리스트
-// 사용자가 수동 매매 후 "거래 완료" 버튼 → Firebase /trades 저장
+// TabLiveSim — 실시간 신호 탭 (v2.0  2026-03-21)
+//
+// 데이터 흐름:
+//   telegram_alert.py (GitHub Actions 15:00 KST)
+//     → pykrx T-1 종가 수집 → Telegram 발송
+//     → Firebase /daily/{YYYYMMDD} 저장
+//   이 탭:
+//     → /daily/{today}   읽기 → 매수 신호 + 청산 후보 표시
+//     → /holdings/{code} 읽기 → 현재 보유 포트폴리오 표시
+//     → 재실행 버튼 → GitHub Actions workflow_dispatch 호출
 // ════════════════════════════════════════════════════════════════════════
 import React, { useState, useEffect } from "react";
 import { db, COL } from "../firebase.js";
 import {
   collection, doc, getDoc, getDocs,
-  setDoc, query, orderBy, limit, onSnapshot,
+  setDoc, deleteDoc,
 } from "firebase/firestore";
-import { CONFIRMED_PARAMS, STOCK_POOL, GDB_MONTHLY, GDB_LAST_DATE } from "../gdb.js";
 
-// ── 날짜 헬퍼
-const todayKey  = () => new Date().toISOString().slice(0,10).replace(/-/g,""); // "20260321"
-const todayDisp = () => {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
-};
+// ── GitHub 설정 (재실행 버튼용)
+const GH_OWNER = "plnman";
+const GH_REPO  = "smartswing-nh";
+const GH_WF    = "daily_alert.yml";
 
-// ── 단순 시뮬: GDB + UDB 월별 데이터 합산 후 당월 신호 계산
-function calcTodaySignals(allMonthly, params) {
-  const signals = [];
-  const today   = new Date();
-  const yyyymm  = `${String(today.getFullYear()).slice(2)}-${String(today.getMonth()+1).padStart(2,"0")}`;
-
-  const sigThreshBase = Math.max(0.8, (params.adx - 20) * 0.15);
-  const sigThresh     = sigThreshBase * Math.max(0.6, params.zscore * 0.35);
-  const mlPassMax     = 100 - (params.mlThresh - 55);
-  const NSLOTS        = 5;
-
-  allMonthly.forEach((m, i) => {
-    if (m.date !== yyyymm) return; // 당월만
-    const absR = Math.abs(m.r);
-    if (absR < sigThresh) return;
-
-    for (let slot = 0; slot < NSLOTS; slot++) {
-      const monthNum = parseInt(m.date.slice(3));
-      const yearNum  = parseInt(m.date.slice(0,2));
-      const seed = (monthNum * 17 + yearNum * 31 + i * 7 + slot * 37) % 100;
-      if (absR < sigThresh * 2 && seed % 2 === 0) continue;
-      if (seed > mlPassMax) continue;
-
-      // CVD 필터
-      const cvdMonths = Math.max(1, Math.round(params.cvdWin / 15));
-      const cvdSlice  = allMonthly.slice(Math.max(0, i - cvdMonths), i);
-      const cvdGate   = -(params.cvdCompare);
-      if (cvdSlice.length > 0) {
-        const netCVD = cvdSlice.reduce((acc, x) => acc + (x.r > 0 ? 1 : -1), 0);
-        if (netCVD <= cvdGate && m.r < 0) continue;
-      }
-
-      const stockIdx = seed % STOCK_POOL.length;
-      const stock    = STOCK_POOL[stockIdx];
-      const rawHoldBase     = 15 + ((seed * 2) % 10);
-      const prevR           = i > 0 ? allMonthly[i - 1].r : 0;
-      const momentumBonus   = prevR >= 8 ? 5 : prevR >= 5 ? 2 : 0;
-      const holdDays        = Math.min(25, rawHoldBase + momentumBonus);
-      const entryDay        = 3 + (seed % 22);
-
-      signals.push({
-        slot,
-        stock,
-        action:   m.r > 0 ? "BUY" : "SELL_SIGNAL",
-        month:    m.date,
-        entryDay,
-        holdDays,
-        exitDay:  Math.min(28, entryDay + holdDays),
-        kospiR:   m.r,
-        seed,
-      });
-    }
-  });
-
-  return signals;
+// ── KST 기준 오늘 날짜
+function getKSTDateKey() {
+  const kst = new Date(Date.now() + 9 * 3600_000);
+  return kst.toISOString().slice(0, 10).replace(/-/g, ""); // "20260321"
+}
+function getKSTDateDisp() {
+  const kst = new Date(Date.now() + 9 * 3600_000);
+  return kst.toISOString().slice(0, 10); // "2026-03-21"
 }
 
+// ════════════════════════════════════════════════════════════════════════
+//  메인 컴포넌트
+// ════════════════════════════════════════════════════════════════════════
 export default function TabLiveSim() {
-  const [signals,   setSignals]   = useState([]);
-  const [udbMonths, setUdbMonths] = useState([]);
+  const [daily,     setDaily]     = useState(null);   // /daily/{today} 문서
+  const [holdings,  setHoldings]  = useState({});     // {code: holdingObj}
+  const [udbMonths, setUdbMonths] = useState([]);     // /udb 월별 목록
   const [loading,   setLoading]   = useState(true);
-  const [lastRun,   setLastRun]   = useState(null);
-  const [tradeInput, setTradeInput] = useState({});
-  const [saving,    setSaving]    = useState({});
-  const [saved,     setSaved]     = useState({});
-  const [firebaseOk, setFirebaseOk] = useState(null);
 
-  // ── Firebase 연결 확인 + UDB 로드
+  // 재실행 버튼 상태
+  const [rerunning, setRerunning] = useState(false);
+  const [rerunMsg,  setRerunMsg]  = useState("");
+
+  // 매수 등록 모달
+  const [addModal, setAddModal] = useState(null);     // signal 객체
+  const [addForm,  setAddForm]  = useState({ entry_price: "", qty: "" });
+
+  const todayKey  = getKSTDateKey();
+  const todayDisp = getKSTDateDisp();
+
+  // ── 초기 데이터 로드
   useEffect(() => {
-    const loadUDB = async () => {
+    const load = async () => {
       try {
-        const snap = await getDocs(collection(db, COL.UDB));
-        const udb  = snap.docs.map(d => ({ date: d.id, ...d.data() }))
-          .sort((a, b) => a.date.localeCompare(b.date));
-        setUdbMonths(udb);
-        setFirebaseOk(true);
+        // 오늘 신호
+        const dailySnap = await getDoc(doc(db, COL.DAILY, todayKey));
+        setDaily(dailySnap.exists() ? dailySnap.data() : null);
 
-        // 오늘 날짜의 기존 신호 확인
-        const sigDoc = await getDoc(doc(db, COL.SIGNALS, todayKey()));
-        if (sigDoc.exists()) {
-          setSignals(sigDoc.data().signals || []);
-          setLastRun(sigDoc.data().runAt || null);
-        } else {
-          runSim(udb);
-        }
+        // 보유 포지션
+        const hSnap = await getDocs(collection(db, COL.HOLDINGS));
+        const map   = {};
+        hSnap.forEach(d => { map[d.id] = d.data(); });
+        setHoldings(map);
+
+        // UDB 현황
+        const uSnap = await getDocs(collection(db, COL.UDB));
+        const uList = uSnap.docs
+          .map(d => ({ date: d.id, r: d.data().r ?? 0 }))
+          .sort((a, b) => a.date.localeCompare(b.date));
+        setUdbMonths(uList);
+
       } catch (e) {
-        console.warn("Firebase 연결 안 됨 — GDB만으로 실행:", e.message);
-        setFirebaseOk(false);
-        runSim([]);
+        console.error("Firebase 로드 실패:", e);
       } finally {
         setLoading(false);
       }
     };
-    loadUDB();
-  }, []);
+    load();
+  }, [todayKey]);
 
-  // ── 시뮬 실행
-  const runSim = async (udb = udbMonths) => {
-    const allMonthly = [
-      ...GDB_MONTHLY,
-      ...udb.map(u => ({ date: u.date, r: u.r })),
-    ];
-    const result = calcTodaySignals(allMonthly, CONFIRMED_PARAMS);
-    setSignals(result);
-    const runAt = new Date().toISOString();
-    setLastRun(runAt);
+  // ── 재실행: Firestore /config/github 에서 PAT 읽어 GitHub API 호출
+  const handleRerun = async () => {
+    setRerunning(true);
+    setRerunMsg("GitHub PAT 확인 중…");
+    try {
+      const cfgSnap = await getDoc(doc(db, "config", "github"));
+      const pat = cfgSnap.exists() ? cfgSnap.data().pat : null;
 
-    // Firebase에 저장 (연결된 경우)
-    if (firebaseOk) {
-      try {
-        await setDoc(doc(db, COL.SIGNALS, todayKey()), {
-          signals: result,
-          runAt,
-          date: todayDisp(),
-          params: CONFIRMED_PARAMS,
-        });
-      } catch(e) { console.warn("신호 저장 실패:", e.message); }
+      if (!pat) {
+        setRerunMsg(
+          "❌ PAT 미등록 — Firebase Console > Firestore > config/github 문서에 pat 필드 추가 필요"
+        );
+        setRerunning(false);
+        return;
+      }
+
+      setRerunMsg("GitHub Actions 트리거 중…");
+      const res = await fetch(
+        `https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/actions/workflows/${GH_WF}/dispatches`,
+        {
+          method: "POST",
+          headers: {
+            Authorization:          `Bearer ${pat}`,
+            Accept:                 "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+          },
+          body: JSON.stringify({ ref: "main" }),
+        }
+      );
+
+      if (res.status === 204) {
+        setRerunMsg("✅ 재실행 요청 완료 — 약 2~3분 후 Telegram 알림 + 이 페이지 새로고침");
+      } else {
+        const txt = await res.text();
+        setRerunMsg(`❌ 실패 (HTTP ${res.status}): ${txt}`);
+      }
+    } catch (e) {
+      setRerunMsg(`❌ 오류: ${e.message}`);
+    } finally {
+      setRerunning(false);
+      setTimeout(() => setRerunMsg(""), 10_000);
     }
   };
 
-  // ── 거래 완료 등록
-  const handleTradeComplete = async (sig, idx) => {
-    const input = tradeInput[idx] || {};
-    if (!input.buyPrice || !input.sellPrice) return;
+  // ── 매수 등록 (모달 확인)
+  const handleAddHolding = async () => {
+    if (!addModal) return;
+    const entryPrice = parseFloat(addForm.entry_price);
+    const qty        = parseInt(addForm.qty, 10);
+    if (!entryPrice || !qty) return;
 
-    setSaving(s => ({ ...s, [idx]: true }));
-    const actualRet = +((input.sellPrice - input.buyPrice) / input.buyPrice * 100 - 0.31).toFixed(2);
-    const tradeData = {
-      date:       todayDisp(),
-      stock:      sig.stock,
-      slot:       sig.slot,
-      action:     sig.action,
-      buyPrice:   +input.buyPrice,
-      sellPrice:  +input.sellPrice,
-      qty:        +(input.qty || 0),
-      actualRet,
-      simMonth:   sig.month,
-      holdDays:   sig.holdDays,
-      createdAt:  new Date().toISOString(),
+    const data = {
+      name:        addModal.name,
+      code:        addModal.code,
+      slot:        addModal.slot,
+      rsi2:        addModal.rsi2,
+      adx:         addModal.adx,
+      entry_price: entryPrice,
+      qty,
+      amount:      entryPrice * qty,
+      entry_date:  todayDisp,
     };
 
-    try {
-      const tradeId = `${todayKey()}_s${sig.slot}_${sig.stock.code}`;
-      await setDoc(doc(db, COL.TRADES, tradeId), tradeData);
-      setSaved(s => ({ ...s, [idx]: true }));
-      setTimeout(() => setSaved(s => ({ ...s, [idx]: false })), 3000);
-    } catch(e) {
-      alert("저장 실패: " + e.message);
-    } finally {
-      setSaving(s => ({ ...s, [idx]: false }));
-    }
+    await setDoc(doc(db, COL.HOLDINGS, addModal.code), data);
+    setHoldings(prev => ({ ...prev, [addModal.code]: data }));
+    setAddModal(null);
+    setAddForm({ entry_price: "", qty: "" });
   };
 
+  // ── 매도 완료 (보유 제거)
+  const handleRemoveHolding = async (code) => {
+    await deleteDoc(doc(db, COL.HOLDINGS, code));
+    setHoldings(prev => {
+      const next = { ...prev };
+      delete next[code];
+      return next;
+    });
+  };
+
+  // ── 로딩
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64 text-slate-500">
-        <svg className="animate-spin w-6 h-6 mr-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
-          <circle cx="12" cy="12" r="10" strokeOpacity="0.3"/><path d="M12 2a10 10 0 0 1 10 10"/>
+        <svg className="animate-spin w-6 h-6 mr-3" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" strokeWidth="3">
+          <circle cx="12" cy="12" r="10" strokeOpacity="0.3"/>
+          <path d="M12 2a10 10 0 0 1 10 10"/>
         </svg>
-        Firebase + UDB 로딩 중…
+        Firebase 로딩 중…
       </div>
     );
   }
 
+  const signals = daily?.signals || [];
+  const exits   = daily?.exits   || [];
+  const t1Date  = daily?.t1_date;
+  const runAt   = daily?.run_at;
+
   return (
     <div className="space-y-4">
-      {/* 상태 배너 */}
+
+      {/* ── 상태 배너 */}
       <div className={`flex items-center gap-3 px-4 py-3 rounded-xl text-xs border ${
-        firebaseOk
-          ? "bg-emerald-950/40 border-emerald-800/50 text-emerald-300"
-          : "bg-amber-950/40 border-amber-800/50 text-amber-300"
+        daily
+          ? "bg-emerald-950/40 border-emerald-800/50"
+          : "bg-amber-950/40 border-amber-800/50"
       }`}>
-        <span className={`w-2 h-2 rounded-full ${firebaseOk ? "bg-emerald-400" : "bg-amber-400"} animate-pulse`}/>
-        <div className="flex-1">
-          {firebaseOk
-            ? <>Firebase 연결 OK · UDB {udbMonths.length}개월 로드 · 오늘: <span className="font-bold">{todayDisp()}</span></>
-            : <>Firebase 미연결 — GDB만으로 시뮬 실행 중 (firebase.js config 설정 필요)</>
-          }
+        <span className={`w-2 h-2 rounded-full shrink-0 ${
+          daily ? "bg-emerald-400 animate-pulse" : "bg-amber-400"
+        }`}/>
+        <div className="flex-1 leading-relaxed">
+          {daily ? (
+            <span className="text-emerald-300">
+              오늘 신호 로드 완료 &middot; T-1 기준:{" "}
+              <span className="font-bold text-white">{t1Date}</span>
+              {runAt && (
+                <span className="text-slate-500 ml-2">
+                  · 실행 {new Date(runAt).toLocaleTimeString("ko-KR")}
+                </span>
+              )}
+            </span>
+          ) : (
+            <span className="text-amber-300">
+              오늘 신호 없음 — 아직 15:00 자동 알림 전이거나 수동 재실행이 필요합니다
+            </span>
+          )}
         </div>
         <button
-          onClick={() => runSim()}
-          className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold"
+          onClick={handleRerun}
+          disabled={rerunning}
+          className="shrink-0 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500
+            disabled:bg-slate-700 disabled:text-slate-500
+            text-white rounded-lg text-xs font-semibold transition-all"
         >
-          🔄 재실행
+          {rerunning ? "⏳ 요청 중…" : "🔄 재실행"}
         </button>
       </div>
 
-      {/* 실행 정보 */}
-      <div className="flex items-center gap-3 text-xs text-slate-500">
-        <span>📅 기준일: <span className="text-slate-300 font-bold">{todayDisp()}</span></span>
-        <span>|</span>
-        <span>⏰ 마지막 실행: <span className="text-slate-300">{lastRun ? new Date(lastRun).toLocaleTimeString("ko-KR") : "—"}</span></span>
-        <span>|</span>
-        <span>📊 GDB+UDB: <span className="text-slate-300">{GDB_MONTHLY.length + udbMonths.length}개월</span></span>
-        <span className="ml-auto text-[10px] bg-indigo-900/50 text-indigo-300 px-2 py-1 rounded-full">
-          v10.0 파라미터 적용
-        </span>
-      </div>
+      {rerunMsg && (
+        <div className="px-4 py-2.5 rounded-lg text-xs border bg-indigo-950/60 border-indigo-800/50 text-indigo-200">
+          {rerunMsg}
+        </div>
+      )}
 
-      {/* 매수/매도 제안 리스트 */}
+      {/* ── 매수 신호 */}
+      <SignalSection
+        title="▲ 오늘 매수 신호"
+        count={signals.length}
+        countColor="bg-emerald-900/60 text-emerald-300"
+        badge="T-1 종가 기준 · RSI-2 ≤ 15 + ADX ≥ 30"
+        empty={daily ? "오늘 매수 신호 없음" : "신호 데이터 없음 — 재실행 또는 15:00 이후 확인"}
+      >
+        {signals.map((s, i) => {
+          const held = !!holdings[s.code];
+          return (
+            <div key={i} className="p-4 space-y-2">
+              {/* 종목 헤더 */}
+              <div className="flex items-center gap-3">
+                <span className="px-2.5 py-1 rounded-lg text-xs font-bold
+                  bg-emerald-900/60 text-emerald-300 border border-emerald-700/50 shrink-0">
+                  ▲ 매수
+                </span>
+                <div className="flex-1 min-w-0">
+                  <span className="font-bold text-slate-200">{s.name}</span>
+                  <span className="text-xs text-slate-500 ml-2">{s.code} · 슬롯{s.slot}</span>
+                </div>
+                <div className="text-right shrink-0">
+                  <div className="text-xs text-slate-300">
+                    ₩{s.price?.toLocaleString()} × {s.qty}주
+                  </div>
+                  <div className="text-[10px] text-slate-500">
+                    = ₩{(s.price * s.qty)?.toLocaleString()}
+                  </div>
+                </div>
+              </div>
+
+              {/* 신호 사유 + 등록 버튼 */}
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="px-2 py-0.5 rounded bg-slate-700 text-emerald-400 font-mono text-[11px]">
+                  RSI-2 = {s.rsi2} ≤ 15 ✓
+                </span>
+                <span className="px-2 py-0.5 rounded bg-slate-700 text-sky-400 font-mono text-[11px]">
+                  ADX = {s.adx} ≥ 30 ✓
+                </span>
+                <span className="text-[10px] text-slate-600">과매도 + 추세 확인</span>
+
+                {held ? (
+                  <span className="ml-auto text-xs text-yellow-400 font-semibold">🟡 보유 중</span>
+                ) : (
+                  <button
+                    onClick={() => {
+                      setAddModal(s);
+                      setAddForm({
+                        entry_price: String(Math.round(s.price)),
+                        qty:         String(s.qty),
+                      });
+                    }}
+                    className="ml-auto px-3 py-1 text-xs font-semibold rounded-lg transition-all
+                      bg-emerald-800 hover:bg-emerald-700 text-emerald-200"
+                  >
+                    + 매수 등록
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </SignalSection>
+
+      {/* ── 청산 후보 */}
+      <SignalSection
+        title="⬇ 청산 후보"
+        count={exits.length}
+        countColor="bg-red-900/60 text-red-300"
+        badge="RSI-2 ≥ 99 과매수 감지"
+        empty="청산 후보 없음"
+      >
+        {exits.map((e, i) => {
+          const held = !!holdings[e.code];
+          return (
+            <div key={i} className="p-3 flex items-center gap-3">
+              {held ? (
+                <span className="px-2.5 py-1 rounded-lg text-xs font-bold shrink-0
+                  bg-red-900/60 text-red-300 border border-red-700/50">
+                  ⚠ 청산 권고
+                </span>
+              ) : (
+                <span className="px-2.5 py-1 rounded-lg text-xs shrink-0
+                  bg-slate-700/50 text-slate-500 border border-slate-600/50">
+                  참고
+                </span>
+              )}
+
+              <div className="flex-1 min-w-0">
+                <span className={`font-bold text-sm ${held ? "text-slate-200" : "text-slate-500"}`}>
+                  {e.name}
+                </span>
+                <span className="text-xs text-slate-600 ml-2">{e.code}</span>
+              </div>
+
+              <span className="font-mono text-[11px] text-red-400 px-2 py-0.5 rounded bg-slate-700 shrink-0">
+                RSI-2 = {e.rsi2} ≥ 99
+              </span>
+
+              {held && (
+                <button
+                  onClick={() => handleRemoveHolding(e.code)}
+                  className="px-3 py-1 text-xs font-semibold rounded-lg shrink-0 transition-all
+                    bg-red-900 hover:bg-red-800 text-red-200"
+                >
+                  매도 완료
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </SignalSection>
+
+      {/* ── 현재 포트폴리오 */}
       <div className="bg-slate-800 rounded-xl border border-slate-700">
         <div className="flex items-center gap-2 p-4 border-b border-slate-700">
-          <span className="text-sm font-bold text-slate-200">오늘의 매수/매도 제안</span>
-          <span className="ml-2 text-xs bg-indigo-900/60 text-indigo-300 px-2 py-0.5 rounded-full">
-            {signals.length}건
+          <span className="text-sm font-bold text-slate-200">💼 현재 포트폴리오</span>
+          <span className="ml-1 text-xs bg-indigo-900/60 text-indigo-300 px-2 py-0.5 rounded-full">
+            {Object.keys(holdings).length}종목
           </span>
           <span className="ml-auto text-[10px] text-slate-500">
-            거래 완료 후 아래 실제가격 입력 → 저장
+            총 투자금 ₩{
+              Object.values(holdings)
+                .reduce((sum, h) => sum + (h.entry_price * h.qty || 0), 0)
+                .toLocaleString()
+            }
           </span>
         </div>
 
-        {signals.length === 0 ? (
+        {Object.keys(holdings).length === 0 ? (
           <div className="p-8 text-center text-slate-600 text-sm">
-            오늘은 시뮬 신호 없음 — 당월 KOSPI 변동이 임계값 미달이거나 CVD 필터 차단
+            보유 종목 없음 — 매수 신호에서 "매수 등록" 클릭 시 추가됩니다
           </div>
         ) : (
-          <div className="divide-y divide-slate-700">
-            {signals.map((sig, idx) => (
-              <div key={idx} className="p-4">
-                <div className="flex items-center gap-3 mb-3">
-                  {/* 액션 배지 */}
-                  <span className={`px-2.5 py-1 rounded-lg text-xs font-bold ${
-                    sig.action === "BUY"
-                      ? "bg-emerald-900/60 text-emerald-300 border border-emerald-700/50"
-                      : "bg-red-900/60 text-red-300 border border-red-700/50"
-                  }`}>
-                    {sig.action === "BUY" ? "▲ 매수" : "▼ 매도 신호"}
-                  </span>
-                  <span className="font-bold text-slate-200">{sig.stock.name}</span>
-                  <span className="text-xs text-slate-500">{sig.stock.code}</span>
-                  <span className="ml-auto text-xs text-slate-500">
-                    진입일 {sig.month}-{String(sig.entryDay).padStart(2,"0")} · 보유 {sig.holdDays}일
-                  </span>
-                </div>
-
-                {/* 실제 거래 입력 폼 */}
-                <div className="flex items-center gap-2 mt-2">
-                  <div className="flex items-center gap-1.5 text-xs">
-                    <span className="text-slate-500">매수가</span>
-                    <input
-                      type="number" placeholder="0"
-                      value={tradeInput[idx]?.buyPrice || ""}
-                      onChange={e => setTradeInput(t => ({...t, [idx]: {...(t[idx]||{}), buyPrice: e.target.value}}))}
-                      className="w-24 bg-slate-700 border border-slate-600 rounded-lg px-2 py-1 text-right text-slate-200 focus:outline-none focus:border-indigo-500"
-                    />
-                  </div>
-                  <div className="flex items-center gap-1.5 text-xs">
-                    <span className="text-slate-500">매도가</span>
-                    <input
-                      type="number" placeholder="0"
-                      value={tradeInput[idx]?.sellPrice || ""}
-                      onChange={e => setTradeInput(t => ({...t, [idx]: {...(t[idx]||{}), sellPrice: e.target.value}}))}
-                      className="w-24 bg-slate-700 border border-slate-600 rounded-lg px-2 py-1 text-right text-slate-200 focus:outline-none focus:border-indigo-500"
-                    />
-                  </div>
-                  <div className="flex items-center gap-1.5 text-xs">
-                    <span className="text-slate-500">수량</span>
-                    <input
-                      type="number" placeholder="0"
-                      value={tradeInput[idx]?.qty || ""}
-                      onChange={e => setTradeInput(t => ({...t, [idx]: {...(t[idx]||{}), qty: e.target.value}}))}
-                      className="w-16 bg-slate-700 border border-slate-600 rounded-lg px-2 py-1 text-right text-slate-200 focus:outline-none focus:border-indigo-500"
-                    />
-                  </div>
-                  {tradeInput[idx]?.buyPrice && tradeInput[idx]?.sellPrice && (
-                    <span className={`text-xs font-bold ${
-                      (tradeInput[idx].sellPrice - tradeInput[idx].buyPrice) >= 0
-                        ? "text-emerald-400" : "text-red-400"
-                    }`}>
-                      {(((tradeInput[idx].sellPrice - tradeInput[idx].buyPrice) / tradeInput[idx].buyPrice) * 100 - 0.31).toFixed(2)}%
+          <div className="divide-y divide-slate-700/60">
+            {Object.values(holdings).map(h => (
+              <div key={h.code} className="p-3 flex items-center gap-3">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-bold text-slate-200">{h.name}</span>
+                    <span className="text-xs text-slate-500">{h.code}</span>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-900/50 text-indigo-400">
+                      슬롯{h.slot}
                     </span>
-                  )}
-                  <button
-                    onClick={() => handleTradeComplete(sig, idx)}
-                    disabled={saving[idx] || !tradeInput[idx]?.buyPrice}
-                    className={`ml-auto px-4 py-1.5 text-xs font-bold rounded-lg transition-all ${
-                      saved[idx]
-                        ? "bg-emerald-700 text-emerald-200"
-                        : "bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 disabled:text-slate-600 text-white"
-                    }`}
-                  >
-                    {saved[idx] ? "✅ 저장 완료" : saving[idx] ? "저장 중…" : "✔ 거래 완료"}
-                  </button>
+                    <span className="text-[10px] text-slate-600">진입 {h.entry_date}</span>
+                  </div>
+                  <div className="mt-1 text-xs text-slate-400 flex items-center gap-3">
+                    <span>₩{h.entry_price?.toLocaleString()} × {h.qty}주</span>
+                    <span className="text-slate-600">= ₩{(h.entry_price * h.qty)?.toLocaleString()}</span>
+                    <span className="font-mono text-[10px] text-slate-600">
+                      RSI-2={h.rsi2} ADX={h.adx}
+                    </span>
+                  </div>
                 </div>
+                <button
+                  onClick={() => handleRemoveHolding(h.code)}
+                  className="px-3 py-1.5 text-xs rounded-lg shrink-0 transition-all
+                    bg-slate-700 hover:bg-red-900 text-slate-400 hover:text-red-200"
+                >
+                  매도 완료
+                </button>
               </div>
             ))}
           </div>
         )}
       </div>
 
-      {/* UDB 현황 */}
-      <div className="bg-slate-800 rounded-xl p-4 border border-slate-700">
-        <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">
-          UDB 현황 ({udbMonths.length}개월)
-        </p>
-        {udbMonths.length === 0 ? (
-          <p className="text-xs text-slate-600">UDB 데이터 없음 — Firebase /udb 컬렉션에 26-04부터 추가</p>
-        ) : (
-          <div className="flex flex-wrap gap-1.5">
-            {udbMonths.map(u => (
-              <span key={u.date} className={`text-[10px] px-2 py-1 rounded ${
-                u.r >= 0 ? "bg-emerald-900/40 text-emerald-400" : "bg-red-900/40 text-red-400"
+      {/* ── UDB 현황 (소형) */}
+      {udbMonths.length > 0 && (
+        <div className="bg-slate-800/60 rounded-xl p-3 border border-slate-700/40">
+          <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">
+            UDB 누적 ({udbMonths.length}개월)
+          </p>
+          <div className="flex flex-wrap gap-1">
+            {udbMonths.map(m => (
+              <span key={m.date} className={`text-[10px] px-1.5 py-0.5 rounded ${
+                m.r >= 0
+                  ? "bg-emerald-900/40 text-emerald-500"
+                  : "bg-red-900/40 text-red-500"
               }`}>
-                {u.date} {u.r >= 0 ? "+" : ""}{u.r}%
+                {m.date} {m.r >= 0 ? "+" : ""}{m.r}%
               </span>
             ))}
           </div>
-        )}
+        </div>
+      )}
+
+      {/* ── 매수 등록 모달 */}
+      {addModal && (
+        <div
+          className="fixed inset-0 bg-black/70 flex items-center justify-center z-50"
+          onClick={() => setAddModal(null)}
+        >
+          <div
+            className="bg-slate-800 border border-slate-600 rounded-2xl p-6 w-80 space-y-4"
+            onClick={e => e.stopPropagation()}
+          >
+            <div>
+              <h3 className="font-bold text-slate-200 text-base">매수 등록</h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                {addModal.name} ({addModal.code}) · 슬롯{addModal.slot}
+              </p>
+              <div className="mt-1 flex gap-2 text-[11px]">
+                <span className="px-1.5 py-0.5 rounded bg-slate-700 text-emerald-400 font-mono">
+                  RSI-2 = {addModal.rsi2}
+                </span>
+                <span className="px-1.5 py-0.5 rounded bg-slate-700 text-sky-400 font-mono">
+                  ADX = {addModal.adx}
+                </span>
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs text-slate-400 mb-1 block">실제 매수가 (원)</label>
+                <input
+                  type="number"
+                  value={addForm.entry_price}
+                  onChange={e => setAddForm(f => ({ ...f, entry_price: e.target.value }))}
+                  className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2
+                    text-sm text-slate-200 focus:outline-none focus:border-indigo-500"
+                  placeholder={String(Math.round(addModal.price))}
+                />
+              </div>
+              <div>
+                <label className="text-xs text-slate-400 mb-1 block">수량 (주)</label>
+                <input
+                  type="number"
+                  value={addForm.qty}
+                  onChange={e => setAddForm(f => ({ ...f, qty: e.target.value }))}
+                  className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2
+                    text-sm text-slate-200 focus:outline-none focus:border-indigo-500"
+                  placeholder={String(addModal.qty)}
+                />
+              </div>
+
+              {addForm.entry_price && addForm.qty && (
+                <div className="text-xs text-slate-400 bg-slate-700/50 rounded px-3 py-2">
+                  총 투자금 ₩{(
+                    parseFloat(addForm.entry_price) * parseInt(addForm.qty, 10)
+                  ).toLocaleString()}
+                </div>
+              )}
+            </div>
+
+            <div className="flex gap-2">
+              <button
+                onClick={() => setAddModal(null)}
+                className="flex-1 px-4 py-2 text-sm rounded-lg transition-all
+                  bg-slate-700 hover:bg-slate-600 text-slate-300"
+              >
+                취소
+              </button>
+              <button
+                onClick={handleAddHolding}
+                disabled={!addForm.entry_price || !addForm.qty}
+                className="flex-1 px-4 py-2 text-sm font-semibold rounded-lg transition-all
+                  bg-emerald-700 hover:bg-emerald-600
+                  disabled:bg-slate-700 disabled:text-slate-600 text-white"
+              >
+                등록
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── 공용 섹션 컨테이너
+function SignalSection({ title, count, countColor, badge, empty, children }) {
+  const hasItems = React.Children.count(children) > 0;
+  return (
+    <div className="bg-slate-800 rounded-xl border border-slate-700">
+      <div className="flex items-center gap-2 p-4 border-b border-slate-700">
+        <span className="text-sm font-bold text-slate-200">{title}</span>
+        <span className={`ml-1 text-xs px-2 py-0.5 rounded-full ${countColor}`}>
+          {count}건
+        </span>
+        <span className="ml-auto text-[10px] text-slate-500">{badge}</span>
       </div>
+
+      {!hasItems ? (
+        <div className="p-6 text-center text-slate-600 text-sm">{empty}</div>
+      ) : (
+        <div className="divide-y divide-slate-700/60">{children}</div>
+      )}
     </div>
   );
 }

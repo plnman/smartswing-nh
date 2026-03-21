@@ -41,12 +41,13 @@ jobs:
           python-version: "3.11"
 
       - name: 의존성 설치
-        run: pip install requests pykrx pandas
+        run: pip install requests pykrx pandas firebase-admin
 
       - name: 15:00 KST Telegram 알림 전송
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_BOT_TOKEN:   ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:     ${{ secrets.TELEGRAM_CHAT_ID }}
+          FIREBASE_CREDENTIALS: ${{ secrets.FIREBASE_CREDENTIALS }}
           # 수동(workflow_dispatch) 실행 시 주말도 강제 전송
           FORCE_RUN: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}
         run: python3 scripts/telegram_alert.py
