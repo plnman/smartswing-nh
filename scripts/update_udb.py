@@ -292,6 +292,83 @@ def compute_strategy_kpi(all_r: list) -> dict:
     }
 
 
+def load_kpi_from_firebase(db_client):
+    """Firebase /config/kpi 현재값 로드. 없으면 None 반환."""
+    try:
+        snap = db_client.collection("config").document("kpi").get()
+        if snap.exists:
+            return snap.to_dict()
+        return None
+    except Exception as e:
+        print(f"  ⚠  /config/kpi 로드 실패: {e}")
+        return None
+
+
+def verify_kpi_consistency(py_kpi, js_kpi):
+    """
+    Python 계산 KPI vs Firebase 저장 KPI (JS 계산) 수치 일치 검증.
+
+    Python(compute_strategy_kpi)은 JS(runBacktestLive)의 근사치이므로
+    알고리즘 차이로 인한 어느 정도 편차는 허용합니다.
+    임계값 초과 시 경고 출력.
+
+    허용 편차 (근사치 알고리즘 차이 감안):
+      totalRet: ±100%p  (JS가 훨씬 정교한 시뮬이므로 크게 잡음)
+      annRet  : ±80%p
+      mdd     : ±20%p
+    """
+    THRESHOLDS = {
+        "totalRet": 100.0,
+        "annRet":    80.0,
+        "mdd":       20.0,
+    }
+
+    print("\n🔍  KPI 수치 일치 검증 (Python 계산 vs Firebase 저장값)")
+    print("─" * 60)
+
+    if js_kpi is None:
+        print("  ℹ️  Firebase /config/kpi 없음 — JS 비교 건너뜀 (첫 실행?)")
+        print("─" * 60)
+        return
+
+    js_source  = js_kpi.get("source", "unknown")
+    js_updated = js_kpi.get("updatedAt", "N/A")
+    print(f"  Firebase 기존값: source={js_source}  updatedAt={js_updated}")
+
+    any_warn = False
+    for period in ("1년", "3년", "5년"):
+        py = py_kpi.get(period, {})
+        js = js_kpi.get(period, {})
+        if not js:
+            print(f"  [{period}] Firebase에 해당 기간 없음 — 건너뜀")
+            continue
+
+        row_ok = True
+        details = []
+        for metric in ("totalRet", "annRet", "mdd"):
+            py_v = py.get(metric, 0)
+            js_v = js.get(metric, 0)
+            diff = abs(py_v - js_v)
+            thr  = THRESHOLDS[metric]
+            flag = "⚠ DIFF" if diff > thr else "OK"
+            if diff > thr:
+                row_ok = False
+                any_warn = True
+            details.append(f"{metric}: py={py_v:+.1f}% js={js_v:+.1f}% Δ={diff:.1f}%p [{flag}]")
+
+        status = "✅" if row_ok else "❌"
+        print(f"\n  {status}  [{period}]")
+        for d in details:
+            print(f"       {d}")
+
+    print("─" * 60)
+    if any_warn:
+        print("  ❌  경고: 임계값 초과 편차 감지! 데이터 이상 여부 확인 필요.")
+    else:
+        print("  ✅  모든 기간 허용 편차 이내 — 정상")
+    print()
+
+
 def save_kpi_to_firebase(db_client, kpi: dict):
     """Firebase /config/kpi 에 전략 KPI 저장"""
     kpi["updatedAt"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -337,6 +414,11 @@ def main():
     udb_new = load_all_monthly_from_firebase(db)
     all_r = list(GDB_MONTHLY_R) + [u["r"] for u in udb_new]
     kpi = compute_strategy_kpi(all_r)
+
+    # ── KPI 수치 일치 검증 (Python 계산 vs Firebase 기존 JS 계산) ──
+    existing_kpi = load_kpi_from_firebase(db)
+    verify_kpi_consistency(kpi, existing_kpi)
+
     save_kpi_to_firebase(db, kpi)
 
     print("\n🎉  UDB 업데이트 완료!")
