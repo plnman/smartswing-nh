@@ -10,6 +10,7 @@ import {
 } from "recharts";
 import {
   EQUITY_CURVE_RAW, ALL_MONTHLY, DEFAULT_PARAMS,
+  KPI_BY_PERIOD,
   BASE_CAPITAL, CAPITAL_PER_SLOT, TRADE_COST_PCT,
   krw, STOCK_POOL,
   rc, heatColor, runBacktest,
