@@ -173,7 +173,8 @@ def main():
     today = get_today_kst()
     print(f"[{today.isoformat()}] SmartSwing-NH 알림 실행")
 
-    if not is_trading_day(today):
+    # 환경변수 FORCE_RUN=1 이면 주말도 강제 실행 (테스트용)
+    if not is_trading_day(today) and not os.environ.get("FORCE_RUN"):
         print("주말 — 알림 건너뜀")
         return
 
