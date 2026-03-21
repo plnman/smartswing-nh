@@ -8,7 +8,7 @@ import { DEFAULT_PARAMS, KPI_BY_PERIOD } from "./backtest.js";
 // ── 탭 정의
 const TABS = [
   { id: 0, label: "📊 백테스팅",    sub: "1/3/5년 기간별 실데이터" },
-  { id: 1, label: "🔴 실시간 시뮬", sub: "포트폴리오·워치리스트" },
+  { id: 1, label: "📈 매수/매도 현황", sub: "신호·포트폴리오" },
   { id: 2, label: "📒 거래 기록",   sub: "누적 P&L" },
   { id: 3, label: "⚙️ 전략 세팅",  sub: "5-Layer 파라미터" },
 ];

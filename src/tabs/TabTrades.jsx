@@ -108,7 +108,7 @@ export default function TabTrades() {
         </div>
       ) : (
         <div className="bg-slate-800 rounded-xl p-8 border border-slate-700 text-center text-slate-600 text-sm">
-          아직 실거래 기록이 없습니다 — 실시간 시뮬 탭에서 거래 완료를 등록하면 여기에 표시됩니다.
+          아직 실거래 기록이 없습니다 — 매수/매도 현황 탭에서 거래 완료를 등록하면 여기에 표시됩니다.
         </div>
       )}
 
