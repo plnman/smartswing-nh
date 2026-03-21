@@ -1,6 +1,7 @@
 // ════════════════════════════════════════════════════════════════════════
 // TabBacktest — 백테스팅 탭 (SmartSwing_Dashboard_v3 Tab1 완전 이식)
 // GDB 동결 데이터 기반. backtest.js에서 모든 데이터/엔진 임포트.
+// UDB(Firebase) 신규 월 데이터 자동 merge 지원.
 // ════════════════════════════════════════════════════════════════════════
 import React, { useState, useEffect, useMemo } from "react";
 import {
@@ -8,11 +9,15 @@ import {
   Tooltip, ResponsiveContainer, ReferenceLine,
 } from "recharts";
 import {
-  EQUITY_CURVE_RAW, ALL_MONTHLY, KPI_BY_PERIOD, DEFAULT_PARAMS,
+  EQUITY_CURVE_RAW, ALL_MONTHLY, DEFAULT_PARAMS,
   BASE_CAPITAL, CAPITAL_PER_SLOT, TRADE_COST_PCT,
-  krw, YEARLY_STATS, STOCK_POOL,
+  krw, STOCK_POOL,
   rc, heatColor, runBacktest,
+  buildLiveMonthly, buildLiveEquityCurve, buildLiveStockATR,
+  computeKPIByPeriod, computeYearlyStats, runBacktestLive,
 } from "../backtest.js";
+import { db, COL } from "../firebase.js";
+import { collection, getDocs, doc, setDoc } from "firebase/firestore";
 
 // ── 차트 커스텀 툴팁
 const ChartTooltip = ({ active, payload, label }) => {
@@ -206,21 +211,78 @@ export default function TabBacktest({ params, setParams, period, setPeriod, cust
   const [selectedTrade, setSelectedTrade] = useState(null);
   const [expandedCode, setExpandedCode]   = useState(null);
 
+  // ── UDB Live 데이터 (Firebase에서 GDB 이후 신규 월 로드)
+  const [liveData, setLiveData] = useState(null);
+
+  useEffect(() => {
+    getDocs(collection(db, COL.UDB)).then(snap => {
+      const udbDocs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      const liveMonthly  = buildLiveMonthly(udbDocs);
+      const liveCurve    = buildLiveEquityCurve(udbDocs);
+      const liveStockAtr = buildLiveStockATR(udbDocs);
+      const newData = { allMonthly: liveMonthly, equityCurve: liveCurve, stockAtr: liveStockAtr };
+      setLiveData(newData);
+
+      // 전략 KPI 계산 후 Firebase /config/kpi 에 저장 (Telegram 알림용)
+      try {
+        const { curve: kpiCurve, tradeLog: kpiTrades } = runBacktestLive("5년", DEFAULT_PARAMS, null, newData);
+        const fin5y = kpiCurve.length > 0 ? kpiCurve[kpiCurve.length - 1].strategy : 100;
+        const n5y   = Math.max(kpiCurve.length - 1, 1);
+        const ret5y = +(fin5y - 100).toFixed(1);
+        const ann5y = n5y >= 10 ? +((Math.pow(fin5y / 100, 12 / n5y) - 1) * 100).toFixed(1) : ret5y;
+        let pk5 = -Infinity, mdd5 = 0;
+        kpiCurve.forEach(p => {
+          if (p.strategy > pk5) pk5 = p.strategy;
+          const dd = (p.strategy - pk5) / pk5 * 100;
+          if (dd < mdd5) mdd5 = dd;
+        });
+        const wr5y = kpiTrades.length > 0
+          ? +(kpiTrades.filter(t => t.ret > 0).length / kpiTrades.length * 100).toFixed(1) : 0;
+
+        const { curve: kpiCurve3, tradeLog: kpiTrades3 } = runBacktestLive("3년", DEFAULT_PARAMS, null, newData);
+        const fin3y = kpiCurve3.length > 0 ? kpiCurve3[kpiCurve3.length - 1].strategy : 100;
+        const n3y   = Math.max(kpiCurve3.length - 1, 1);
+        const ret3y = +(fin3y - 100).toFixed(1);
+        const ann3y = n3y >= 10 ? +((Math.pow(fin3y / 100, 12 / n3y) - 1) * 100).toFixed(1) : ret3y;
+
+        const { curve: kpiCurve1, tradeLog: kpiTrades1 } = runBacktestLive("1년", DEFAULT_PARAMS, null, newData);
+        const fin1y = kpiCurve1.length > 0 ? kpiCurve1[kpiCurve1.length - 1].strategy : 100;
+        const ret1y = +(fin1y - 100).toFixed(1);
+
+        setDoc(doc(db, "config", "kpi"), {
+          "1년": { totalRet: ret1y, annRet: ret1y, mdd: 0 },
+          "3년": { totalRet: ret3y, annRet: ann3y, mdd: 0 },
+          "5년": { totalRet: ret5y, annRet: ann5y, mdd: +mdd5.toFixed(1), wr: wr5y },
+          updatedAt: new Date().toISOString(),
+        }).catch(() => {}); // config write 실패 시 무시
+      } catch (e) {
+        console.warn("KPI Firebase 저장 실패:", e);
+      }
+    }).catch(e => {
+      console.warn("UDB 로드 실패 (GDB fallback):", e);
+    });
+  }, []); // eslint-disable-line
+
   const { curve, monthly, tradeLog } = useMemo(
-    () => runBacktest(period, params, customRange),
-    [period, params, customRange]
+    () => liveData
+      ? runBacktestLive(period, params, customRange, liveData)
+      : runBacktest(period, params, customRange),
+    [period, params, customRange, liveData]
   );
 
-  // 커스텀 기간: KOSPI200 KPI 동적 계산
+  // 커스텀 기간: KOSPI200 KPI 동적 계산 (항상 live curve 우선)
+  const liveCurve = liveData?.equityCurve ?? EQUITY_CURVE_RAW;
+  const liveKPIMap = computeKPIByPeriod(liveCurve);
+
   const kpi = (() => {
-    if (period !== "커스텀") return KPI_BY_PERIOD[period];
+    if (period !== "커스텀") return liveKPIMap[period] ?? liveKPIMap["5년"];
     const raw2 = (customRange?.start && customRange?.end)
       ? (() => {
-          const si = EQUITY_CURVE_RAW.findIndex(e => e.d === customRange.start);
-          const ei = EQUITY_CURVE_RAW.findIndex(e => e.d === customRange.end);
-          return (si >= 0 && ei >= si) ? EQUITY_CURVE_RAW.slice(si, ei + 1) : EQUITY_CURVE_RAW;
+          const si = liveCurve.findIndex(e => e.d === customRange.start);
+          const ei = liveCurve.findIndex(e => e.d === customRange.end);
+          return (si >= 0 && ei >= si) ? liveCurve.slice(si, ei + 1) : liveCurve;
         })()
-      : EQUITY_CURVE_RAW;
+      : liveCurve;
     const kospiRet = +((raw2[raw2.length-1].k / raw2[0].k - 1) * 100).toFixed(1);
     let pk = -Infinity, md = 0;
     raw2.forEach(p => { if (p.k > pk) pk = p.k; const dd = (p.k - pk) / pk * 100; if (dd < md) md = dd; });
@@ -555,7 +617,7 @@ export default function TabBacktest({ params, setParams, period, setPeriod, cust
             <span className="text-[10px] bg-indigo-900/40 text-indigo-300 px-2 py-0.5 rounded">실데이터</span>
           </div>
           <div className="space-y-1.5 text-xs">
-            {Object.entries(YEARLY_STATS).map(([yr, s]) => {
+            {Object.entries(computeYearlyStats(liveData?.allMonthly ?? ALL_MONTHLY)).map(([yr, s]) => {
               const barW = Math.min(Math.abs(s.ret) / 100 * 100, 100);
               return (
                 <div key={yr} className="flex items-center gap-2 bg-slate-900 rounded-lg px-3 py-2">

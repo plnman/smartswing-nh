@@ -21,13 +21,46 @@ BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
 
 # ─────────────────────────────────────────────
-#  GDB KPI (backtest.js 동기화)
+#  전략 KPI — Firebase /config/kpi 에서 동적 로드
+#  (TabBacktest.jsx가 매 로드 시 runBacktestLive() 결과를 저장)
+#  없으면 GDB 기준 fallback 사용
 # ─────────────────────────────────────────────
-KPI = {
+KPI_FALLBACK = {
     "1년": {"totalRet": 42.3,  "annRet": 42.3,  "mdd": -1.7},
     "3년": {"totalRet": 183.2, "annRet": 41.0,  "mdd": -3.2},
     "5년": {"totalRet": 1246.5,"annRet": 68.2,  "mdd": -1.7},
 }
+
+def load_kpi_from_firebase():
+    """Firebase /config/kpi 에서 최신 전략 KPI 로드. 실패 시 fallback 반환."""
+    cred_json = os.environ.get("FIREBASE_CREDENTIALS")
+    if not cred_json:
+        return KPI_FALLBACK
+    try:
+        import firebase_admin
+        from firebase_admin import credentials as fb_cred, firestore as fb_fs
+        if not firebase_admin._apps:
+            cred = fb_cred.Certificate(json.loads(cred_json))
+            firebase_admin.initialize_app(cred)
+        db = fb_fs.client()
+        doc = db.collection("config").document("kpi").get()
+        if doc.exists:
+            data = doc.to_dict()
+            # 필수 키 검증
+            kpi = {}
+            for period in ("1년", "3년", "5년"):
+                if period in data and "totalRet" in data[period]:
+                    kpi[period] = data[period]
+                else:
+                    kpi[period] = KPI_FALLBACK[period]
+            print(f"  ✅ Firebase /config/kpi 로드 완료: 5년={kpi['5년'].get('totalRet')}%")
+            return kpi
+        else:
+            print("  ⚠ /config/kpi 문서 없음 — fallback 사용")
+            return KPI_FALLBACK
+    except Exception as e:
+        print(f"  ⚠ KPI Firebase 로드 실패 (fallback): {e}")
+        return KPI_FALLBACK
 
 CAPITAL_PER_SLOT = 10_000_000   # 슬롯당 1천만원
 
@@ -185,9 +218,12 @@ def get_real_signals(today: datetime.datetime):
 # ─────────────────────────────────────────────
 #  메시지 빌드
 # ─────────────────────────────────────────────
-def build_message(today, signals, exits, t1_str):
+def build_message(today, signals, exits, t1_str, kpi_data=None):
     date_str = today.strftime("%Y-%m-%d")
     time_str = today.strftime("%H:%M")
+
+    # KPI: 인자로 전달된 live 값 우선, 없으면 fallback
+    kpi_map = kpi_data if kpi_data else KPI_FALLBACK
 
     lines = [
         f"📊 <b>SmartSwing-NH</b>  <code>{date_str}  {time_str}</code>",
@@ -219,8 +255,8 @@ def build_message(today, signals, exits, t1_str):
         lines.append("─ 없음")
     lines.append("")
 
-    # KPI
-    kpi = KPI["5년"]
+    # KPI (Firebase live 값 반영)
+    kpi = kpi_map.get("5년", KPI_FALLBACK["5년"])
     lines.append("<b>[ 5년 누적 KPI ]</b>")
     lines.append(
         f"+{kpi['totalRet']}%  연환산 +{kpi['annRet']}%  MDD {kpi['mdd']}%"
@@ -296,10 +332,14 @@ def main():
         print("주말 — 알림 건너뜀")
         return
 
+    # Firebase에서 최신 전략 KPI 로드 (TabBacktest.jsx가 저장한 live 계산값)
+    print("🔥 Firebase /config/kpi 로드 중...")
+    kpi_data = load_kpi_from_firebase()
+
     print("📡 pykrx 실시간 데이터 수집 중...")
     signals, exits, t1_str = get_real_signals(today)
 
-    msg = build_message(today, signals, exits, t1_str)
+    msg = build_message(today, signals, exits, t1_str, kpi_data)
     print("─── 전송 메시지 ───")
     print(msg)
     print("──────────────────")

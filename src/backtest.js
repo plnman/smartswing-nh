@@ -328,3 +328,279 @@ export const heatColor = (v) => {
   if (v >= -5)  return "bg-red-400 text-red-950";
   return "bg-red-700 text-white";
 };
+
+// ════════════════════════════════════════════════════════════
+// UDB 연동 — Firebase UDB 데이터를 GDB에 merge (26-04 이후)
+// GDB_LAST_DATE = "26-03" 이후 UDB 문서를 기존 배열에 append
+// ════════════════════════════════════════════════════════════
+
+/** Firebase /udb 컬렉션 문서 배열을 ALL_MONTHLY에 merge (GDB 이후 신규 달만) */
+export function buildLiveMonthly(udbDocs = []) {
+  const GDB_LAST = "26-03";
+  const newRows = udbDocs
+    .filter(u => u.date && u.date > GDB_LAST)
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .map(u => ({
+      date:  u.date,
+      label: u.label  || `20${u.date.replace("-", "-")}`,
+      m:     u.m      || `${u.month}월`,
+      year:  u.year,
+      month: u.month,
+      r:     u.r ?? 0,
+    }));
+  return [...ALL_MONTHLY, ...newRows];
+}
+
+/** Firebase /udb 문서 배열로 EQUITY_CURVE_RAW 연장 */
+export function buildLiveEquityCurve(udbDocs = []) {
+  const GDB_LAST = "26-03";
+  const sorted = udbDocs
+    .filter(u => u.date && u.date > GDB_LAST)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  let prevK = EQUITY_CURVE_RAW[EQUITY_CURVE_RAW.length - 1].k;
+  const extended = sorted.map(u => {
+    const newK = +(prevK * (1 + (u.r ?? 0) / 100)).toFixed(2);
+    prevK = newK;
+    return { d: u.date, k: newK };
+  });
+  return [...EQUITY_CURVE_RAW, ...extended];
+}
+
+/** Firebase /udb 문서 배열로 STOCK_ATR 연장 */
+export function buildLiveStockATR(udbDocs = []) {
+  const GDB_LAST = "26-03";
+  const extended = {};
+  // GDB 값 복사
+  Object.keys(STOCK_ATR).forEach(code => {
+    extended[code] = { ...STOCK_ATR[code] };
+  });
+  // UDB 신규 달 추가
+  udbDocs
+    .filter(u => u.date && u.date > GDB_LAST && u.stocks)
+    .forEach(u => {
+      Object.entries(u.stocks).forEach(([code, data]) => {
+        if (!extended[code]) extended[code] = {};
+        extended[code][u.date] = data.atr_pct ?? 0;
+      });
+    });
+  return extended;
+}
+
+/** EQUITY_CURVE_RAW에서 기간별 KOSPI200 KPI 동적 계산 (KPI_BY_PERIOD 대체) */
+export function computeKPIByPeriod(equityCurve = EQUITY_CURVE_RAW) {
+  const calc = (months) => {
+    const raw = equityCurve.slice(-months);
+    if (raw.length < 2) return null;
+    const totalRet = +((raw[raw.length - 1].k / raw[0].k - 1) * 100).toFixed(1);
+    const annRet   = raw.length >= 10
+      ? +((Math.pow(raw[raw.length - 1].k / raw[0].k, 12 / (raw.length - 1)) - 1) * 100).toFixed(1)
+      : totalRet;
+    let pk = -Infinity, maxDD = 0;
+    raw.forEach(p => {
+      if (p.k > pk) pk = p.k;
+      const dd = (p.k - pk) / pk * 100;
+      if (dd < maxDD) maxDD = dd;
+    });
+    const mdd = +maxDD.toFixed(1);
+    const monthlyRets = raw.slice(1).map((p, i) => (p.k - raw[i].k) / raw[i].k * 100);
+    const mean = monthlyRets.reduce((a, b) => a + b, 0) / monthlyRets.length;
+    const std  = Math.sqrt(monthlyRets.reduce((a, b) => a + (b - mean) ** 2, 0) / monthlyRets.length);
+    const vol  = +(std * Math.sqrt(12)).toFixed(1);
+    const sharpe = vol > 0 ? +((annRet / vol)).toFixed(2) : 0;
+    return { totalRet, annRet, mdd, vol, sharpe, months: raw.length, start: raw[0].d, end: raw[raw.length - 1].d };
+  };
+  return {
+    "1년": calc(13) ?? KPI_BY_PERIOD["1년"],
+    "3년": calc(37) ?? KPI_BY_PERIOD["3년"],
+    "5년": calc(61) ?? KPI_BY_PERIOD["5년"],
+  };
+}
+
+/** ALL_MONTHLY에서 YEARLY_STATS 동적 계산 (하드코딩 대체) */
+export function computeYearlyStats(allMonthly = ALL_MONTHLY) {
+  const byYear = {};
+  allMonthly.forEach(m => {
+    const y = m.year ?? parseInt("20" + m.date.slice(0, 2));
+    if (!byYear[y]) byYear[y] = [];
+    byYear[y].push(m.r ?? 0);
+  });
+  const result = {};
+  Object.entries(byYear).forEach(([year, rets]) => {
+    const totalProd = rets.reduce((acc, r) => acc * (1 + r / 100), 1);
+    const ret  = +((totalProd - 1) * 100).toFixed(1);
+    const mean = rets.reduce((a, b) => a + b, 0) / rets.length;
+    const std  = Math.sqrt(rets.reduce((a, b) => a + (b - mean) ** 2, 0) / rets.length);
+    const vol  = +(std * Math.sqrt(12)).toFixed(1);
+    let v = 100, pk = 100, maxDD = 0;
+    rets.forEach(r => {
+      v = v * (1 + r / 100);
+      if (v > pk) pk = v;
+      const dd = (v - pk) / pk * 100;
+      if (dd < maxDD) maxDD = dd;
+    });
+    result[String(year)] = { ret, mdd: +maxDD.toFixed(1), vol };
+  });
+  return result;
+}
+
+/**
+ * UDB 데이터를 포함한 백테스팅 실행 (liveData 없으면 GDB 하드코딩 사용)
+ * liveData: { allMonthly, equityCurve, stockAtr }
+ */
+export function runBacktestLive(period, params, customRange = null, liveData = null) {
+  const _curve  = liveData?.equityCurve ?? EQUITY_CURVE_RAW;
+  const _monthly = liveData?.allMonthly ?? ALL_MONTHLY;
+  const _atr    = liveData?.stockAtr   ?? STOCK_ATR;
+
+  let raw;
+  const kpiMap  = computeKPIByPeriod(_curve);
+  let nMonths   = kpiMap[period]?.months ?? _curve.length;
+
+  if (period === "커스텀" && customRange?.start && customRange?.end) {
+    const si = _curve.findIndex(e => e.d === customRange.start);
+    const ei = _curve.findIndex(e => e.d === customRange.end);
+    raw = (si >= 0 && ei >= si) ? _curve.slice(si, ei + 1) : _curve;
+    nMonths = raw.length;
+  } else {
+    raw = _curve.slice(-nMonths);
+  }
+  const base = raw[0].k;
+
+  const upMult = +(2.1
+    + (params.adx      - 30) * 0.02
+    + (params.mlThresh - 65) * 0.01
+  ).toFixed(3);
+  const dnMult = +Math.max(0.12,
+    0.35 - (3.5 - params.hardStop) * 0.04
+  ).toFixed(3);
+
+  const startIdx = _monthly.length - (nMonths - 1);
+  const monthly  = _monthly.slice(Math.max(0, startIdx));
+
+  const sigThreshBase = Math.max(0.8, (params.adx - 20) * 0.15);
+  const sigThresh = sigThreshBase * Math.max(0.6, params.zscore * 0.35);
+  const mlPassMax = 100 - (params.mlThresh - 55);
+
+  const NSLOTS = 5;
+  const tradeLog = [];
+  let id = 1;
+
+  monthly.forEach((m, i) => {
+    const absR = Math.abs(m.r);
+    if (absR < sigThresh) return;
+
+    for (let slot = 0; slot < NSLOTS; slot++) {
+      const seed = (m.month * 17 + (m.year % 100) * 31 + i * 7 + slot * 37) % 100;
+      if (absR < sigThresh * 2 && seed % 2 === 0) continue;
+      if (seed > mlPassMax) continue;
+      if (i > 0 && m.r < -1) {
+        const sentScore = monthly[i - 1].r / 15;
+        if (sentScore < params.finBertThresh) continue;
+      }
+      const cvdMonths = Math.max(1, Math.round(params.cvdWin / 15));
+      const cvdSlice  = monthly.slice(Math.max(0, i - cvdMonths), i);
+      if (cvdSlice.length >= 2) {
+        const netCVD  = cvdSlice.reduce((acc, x) => acc + (x.r > 0 ? 1 : -1), 0);
+        const cvdGate = -Math.floor(params.cvdCompare / 2);
+        if (netCVD <= cvdGate && m.r < 0) continue;
+      }
+
+      const stockSeed = (seed * 13 + m.month * 7 + (m.year % 10) * 31 + slot * 11) % STOCK_POOL.length;
+      const stock     = STOCK_POOL[stockSeed];
+      const entryDay  = 3 + (seed % 22);
+      const rawHoldBase = 15 + ((seed * 2) % 10);
+      const prevR       = i > 0 ? monthly[i - 1].r : 0;
+      const momentumBonus = prevR >= 8 ? 5 : prevR >= 5 ? 2 : 0;
+      const rawHold = Math.min(25, rawHoldBase + momentumBonus);
+      const holdDays = params.timeCutOn ? Math.min(params.timeCut, rawHold) : rawHold;
+      const totalDay = entryDay + holdDays;
+      const yy = String(m.year).slice(2);
+      const mm = String(m.month).padStart(2, "0");
+      const entry = `${yy}-${mm}-${String(entryDay).padStart(2, "0")}`;
+
+      let exit;
+      if (totalDay > 28) {
+        const nxtMonth = m.month === 12 ? 1 : m.month + 1;
+        const nxtYear  = m.month === 12 ? m.year + 1 : m.year;
+        const nxtYy    = String(nxtYear).slice(2);
+        const nxtMm    = String(nxtMonth).padStart(2, "0");
+        exit = `${nxtYy}-${nxtMm}-${String(Math.min(totalDay - 28, 25)).padStart(2, "0")}`;
+      } else {
+        exit = `${yy}-${mm}-${String(Math.min(totalDay, 27)).padStart(2, "0")}`;
+      }
+
+      const crossMonth = totalDay > 28 && (i + 1 < monthly.length);
+      let ret;
+      if (crossMonth) {
+        const nextM  = monthly[i + 1];
+        const daysEntry = 28 - entryDay;
+        const daysExit  = holdDays - daysEntry;
+        const fEntry    = daysEntry / holdDays;
+        const fExit     = daysExit  / holdDays;
+        const calcBase  = (r) =>
+          r >= 5  ? r * (upMult * 0.9) :
+          r >= 2  ? r * (upMult * 0.7) :
+          r >= 0  ? r * 1.1 :
+          r >= -4 ? r * dnMult : r * dnMult;
+        ret = +(calcBase(m.r) * fEntry + calcBase(nextM.r) * fExit + (seed % 5) * 0.2).toFixed(1);
+      } else {
+        const participation = Math.min(holdDays / 20, 1.0);
+        let baseRet;
+        if      (m.r >= 5)  baseRet = m.r * (upMult * 0.9) + (seed % 5) * 0.3;
+        else if (m.r >= 2)  baseRet = m.r * (upMult * 0.7) + (seed % 4) * 0.2;
+        else if (m.r >= 0)  baseRet = m.r * 1.1 + 0.4;
+        else if (m.r >= -4) baseRet = m.r * dnMult - 0.2;
+        else                baseRet = m.r * dnMult;
+        ret = +(baseRet * participation).toFixed(1);
+      }
+
+      // _atr 파라미터 사용 (live ATR)
+      const getStockHS = (code, yyyyMM, mult) => {
+        const atrMap = _atr[code];
+        if (!atrMap) return 3.5;
+        const atrPct = atrMap[yyyyMM];
+        if (atrPct == null) return 3.5;
+        return +Math.min(8.0, Math.max(1.5, atrPct * mult)).toFixed(2);
+      };
+      const stockHardStop = getStockHS(stock.code, `${yy}-${mm}`, params.atrMult);
+      ret = Math.max(ret, -(stockHardStop + 0.3));
+      ret = Math.min(ret, params.trailing * 7 + 5);
+      ret = +(ret - TRADE_COST_PCT).toFixed(1);
+
+      const pnl = Math.round(ret / 100 * CAPITAL_PER_SLOT);
+      const l4  = `${61 + (seed % 27)}%`;
+      let reason;
+      if      (ret >= params.trailing * 7 + 4.5) reason = "Trailing";
+      else if (ret > 0)                           reason = `RSI-2≥${params.rsi2Exit}`;
+      else if (ret > -(stockHardStop + 0.2))       reason = `ATR HardStop(${stockHardStop}%)`;
+      else                                        reason = "갭다운";
+
+      tradeLog.push({ id, code: stock.code, name: stock.name, entry, exit, ret, pnl, l4, reason, slot });
+      id++;
+    }
+  });
+
+  const lastRawDate = raw[raw.length - 1].d;
+  const tradeByMonth = {};
+  tradeLog.forEach(t => {
+    const em = t.entry.slice(0, 5);
+    const xm = t.exit.slice(0, 5);
+    const applyMonth = (em === xm) ? em : (xm <= lastRawDate ? xm : em);
+    if (!tradeByMonth[applyMonth]) tradeByMonth[applyMonth] = [];
+    tradeByMonth[applyMonth].push(t.ret);
+  });
+
+  let stratVal = 100;
+  const curve = raw.map((pt) => {
+    const kospi   = +((pt.k / base) * 100).toFixed(2);
+    const d       = kospi - 100;
+    const buyhold = +(100 + d * 0.99).toFixed(2);
+    const monthTrades = tradeByMonth[pt.d];
+    if (monthTrades?.length > 0) {
+      monthTrades.forEach(r => { stratVal = stratVal * (1 + r / 100 / NSLOTS); });
+    }
+    return { date: pt.d, kospi, strategy: +stratVal.toFixed(2), buyhold };
+  });
+
+  return { curve, monthly, tradeLog };
+}

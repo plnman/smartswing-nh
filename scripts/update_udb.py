@@ -201,6 +201,105 @@ def save_to_firebase(db, doc_id: str, data: dict):
     doc_ref.set(data)
     print(f"\n✅  Firebase /udb/{doc_id} 저장 완료")
 
+
+# ─────────────────────────────────────────────
+#  전략 KPI 계산 — ALL_MONTHLY + UDB 기반 (Python 포팅)
+#  GDB 고정 데이터에 UDB 신규 월을 더해 누적수익률·MDD 계산
+# ─────────────────────────────────────────────
+
+# GDB ALL_MONTHLY (r값만 순서대로, backtest.js와 동기화)
+GDB_MONTHLY_R = [
+    1.32,1.25,1.76,1.31,2.55,-3.4,-0.97,-4.4,-3.2,-3.92,5.61,
+    -9.19,0.99,1.12,-2.88,-0.15,-13.36,5.25,-0.11,-12.88,6.47,7.16,-9.33,
+    8.99,-0.78,2.3,1.38,3.87,-0.33,2.26,-3.15,-2.39,-6.48,10.75,5.79,
+    -6.08,5.75,5.36,-2.54,-1.89,7.21,-0.92,-4.98,-4.64,-1.58,-4.08,-2.35,
+    4.89,0.28,-0.57,1.91,6.16,15.29,5.79,-1.93,10.21,22.24,-4.39,9.38,
+    26.8,21.46,-7.6,
+]  # 63개월 (21-01 기준점 제외 → 62개 수익률 = 21-02 ~ 26-03)
+
+GDB_LAST_DATE = "26-03"  # yy-mm
+
+
+def load_all_monthly_from_firebase(db_client) -> list:
+    """Firebase /udb 에서 GDB 이후 신규 월 수익률 로드. [{date, r}] 반환."""
+    try:
+        docs = db_client.collection("udb").stream()
+        new_months = []
+        for d in docs:
+            data = d.to_dict()
+            if data.get("date", "") > GDB_LAST_DATE:
+                new_months.append({"date": data["date"], "r": data.get("r", 0)})
+        new_months.sort(key=lambda x: x["date"])
+        return new_months
+    except Exception as e:
+        print(f"  ⚠  UDB 로드 실패: {e}")
+        return []
+
+
+def compute_strategy_kpi(all_r: list) -> dict:
+    """
+    GDB + UDB 월간 수익률 리스트로 전략 KPI 계산.
+    backtest.js runBacktest()의 Python 근사치:
+    - upMult=2.1(기본), dnMult=0.35 기반 전략 수익률 추정
+    - 매월 50% 참여율(5슬롯/월 평균) 가정
+    """
+    UP = 2.1
+    DN = 0.35
+    PARTICIPATION = 0.50   # 월 평균 참여율 추정
+    COST = 0.31 / 2        # 라운드트립의 절반 (월 단위 추정)
+    NSLOTS = 5
+
+    def monthly_strategy_ret(r):
+        if r >= 5:
+            base = r * (UP * 0.9)
+        elif r >= 2:
+            base = r * (UP * 0.7)
+        elif r >= 0:
+            base = r * 1.1 + 0.4
+        elif r >= -4:
+            base = r * DN - 0.2
+        else:
+            base = r * DN
+        base = max(base, -(3.5 + 0.3))   # hardStop 3.5% 기준
+        base = min(base, 4.0 * 7 + 5)    # trailing 4% 기준
+        base -= COST
+        return base * PARTICIPATION
+
+    def calc_kpi(r_list):
+        if len(r_list) < 2:
+            return {"totalRet": 0, "annRet": 0, "mdd": 0}
+        v = 100.0
+        pk = 100.0
+        max_dd = 0.0
+        for r in r_list:
+            sr = monthly_strategy_ret(r) / NSLOTS
+            v *= (1 + sr / 100)
+            if v > pk:
+                pk = v
+            dd = (v - pk) / pk * 100
+            if dd < max_dd:
+                max_dd = dd
+        n = len(r_list)
+        total_ret = round((v / 100 - 1) * 100, 1)
+        ann_ret = round((pow(v / 100, 12 / n) - 1) * 100, 1) if n >= 10 else total_ret
+        return {"totalRet": total_ret, "annRet": ann_ret, "mdd": round(max_dd, 1)}
+
+    total_n = len(all_r)
+    return {
+        "1년": calc_kpi(all_r[max(0, total_n - 12):]),
+        "3년": calc_kpi(all_r[max(0, total_n - 36):]),
+        "5년": calc_kpi(all_r[max(0, total_n - 60):]),
+    }
+
+
+def save_kpi_to_firebase(db_client, kpi: dict):
+    """Firebase /config/kpi 에 전략 KPI 저장"""
+    kpi["updatedAt"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    kpi["source"] = "update_udb.py"
+    db_client.collection("config").document("kpi").set(kpi)
+    print(f"\n✅  Firebase /config/kpi 저장: 5년 누적 {kpi['5년']['totalRet']}%  연환산 {kpi['5년']['annRet']}%")
+
+
 # ─────────────────────────────────────────────
 #  메인
 # ─────────────────────────────────────────────
@@ -233,10 +332,18 @@ def main():
     db = init_firebase()
     save_to_firebase(db, doc_data["date"], doc_data)
 
+    # ── 전략 KPI 재계산 → /config/kpi 저장 ──
+    print("\n📊  전략 KPI 재계산 중...")
+    udb_new = load_all_monthly_from_firebase(db)
+    all_r = list(GDB_MONTHLY_R) + [u["r"] for u in udb_new]
+    kpi = compute_strategy_kpi(all_r)
+    save_kpi_to_firebase(db, kpi)
+
     print("\n🎉  UDB 업데이트 완료!")
     print(f"     문서 경로: /udb/{doc_data['date']}")
     print(f"     종목 수: {len(doc_data['stocks'])}개")
     print(f"     KOSPI200: {doc_data['r']:+.2f}%")
+    print(f"     전략 KPI (5년): {kpi['5년']['totalRet']}%  연환산 {kpi['5년']['annRet']}%")
 
 if __name__ == "__main__":
     main()
