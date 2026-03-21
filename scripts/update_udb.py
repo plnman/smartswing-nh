@@ -42,22 +42,20 @@ def init_firebase():
     return firestore.client()
 
 # ─────────────────────────────────────────────
-#  종목 풀 (GDB와 동일한 12종목)
+#  종목 풀 — scripts/stock_list.json (GDB와 동일한 200종목)
 # ─────────────────────────────────────────────
-STOCK_POOL = [
-    ("삼성전자",        "005930"),
-    ("SK하이닉스",      "000660"),
-    ("LG에너지솔루션",  "373220"),
-    ("삼성SDI",         "006400"),
-    ("현대차",          "005380"),
-    ("기아",            "000270"),
-    ("POSCO홀딩스",     "005490"),
-    ("NAVER",           "035420"),
-    ("카카오",          "035720"),
-    ("삼성바이오로직스","207940"),
-    ("KB금융",          "105560"),
-    ("신한지주",        "055550"),
-]
+def load_stock_pool() -> list:
+    """
+    scripts/stock_list.json에서 200종목 로드.
+    반환: [(name, code), ...]
+    """
+    import pathlib
+    json_path = pathlib.Path(__file__).parent / "stock_list.json"
+    with open(json_path, encoding="utf-8") as f:
+        items = json.load(f)
+    return [(s["name"], s["code"]) for s in items]
+
+STOCK_POOL = load_stock_pool()
 
 # ─────────────────────────────────────────────
 #  KST 현재시각
@@ -140,6 +138,47 @@ def calc_atr_pct(code: str, end_date_str: str, n: int = 14) -> float:
         print(f"  ⚠  {code} ATR 계산 실패: {e}")
         return 0.0
 
+def calc_stock_monthly_return(code: str, year: int, month: int) -> float:
+    """
+    개별 종목 월간 수익률 (%).
+    = (당월 마지막 거래일 종가 / 전월 마지막 거래일 종가 - 1) × 100
+    """
+    try:
+        import calendar as _cal
+        # 당월 전체 OHLCV 조회 (전월 말 종가도 포함하려고 직전달부터)
+        prev_month = month - 1 if month > 1 else 12
+        prev_year  = year if month > 1 else year - 1
+        start_str  = f"{prev_year}{prev_month:02d}01"
+        last_day   = _cal.monthrange(year, month)[1]
+        end_str    = f"{year}{month:02d}{last_day}"
+
+        df = pykrx_stock.get_market_ohlcv_by_date(start_str, end_str, code)
+        if df.empty or len(df) < 2:
+            return 0.0
+
+        # 전월 마지막 거래일 종가
+        prev_end_str = f"{prev_year}{prev_month:02d}{_cal.monthrange(prev_year, prev_month)[1]}"
+        prev_cutoff  = f"{prev_year}-{prev_month:02d}"  # pandas period 비교용
+        df.index = df.index.tz_localize(None) if df.index.tzinfo else df.index
+        # 인덱스에서 전월 데이터 필터
+        prev_df = df[df.index.to_period("M").astype(str) == f"{prev_year}-{prev_month:02d}"]
+        curr_df = df[df.index.to_period("M").astype(str) == f"{year}-{month:02d}"]
+
+        if prev_df.empty or curr_df.empty:
+            return 0.0
+
+        prev_close = float(prev_df["종가"].iloc[-1])
+        curr_close = float(curr_df["종가"].iloc[-1])
+
+        if prev_close == 0:
+            return 0.0
+        return round((curr_close / prev_close - 1) * 100, 2)
+
+    except Exception as e:
+        print(f"  ⚠  {code} 월간수익률 계산 실패: {e}")
+        return 0.0
+
+
 def get_kospi200_monthly_return(year: int, month: int) -> float:
     """KOSPI200(지수코드 1028) 월간 수익률 (%)"""
     try:
@@ -174,13 +213,18 @@ def build_udb_document(year: int, month: int, date_str: str) -> dict:
     r = get_kospi200_monthly_return(year, month)
     print(f"  KOSPI200 월간 수익률: {r:+.2f}%")
 
-    # 종목별 종가 + ATR
+    # 종목별 종가 + ATR + 월간수익률
     stocks = {}
+    ok_count = 0
     for name, code in STOCK_POOL:
-        close   = get_last_close(code, date_str)
-        atr_pct = calc_atr_pct(code, date_str)
-        stocks[code] = {"close": close, "atr_pct": atr_pct}
-        print(f"  {name}({code}): 종가={close:,.0f}  ATR%={atr_pct}")
+        close    = get_last_close(code, date_str)
+        atr_pct  = calc_atr_pct(code, date_str)
+        monthly_r = calc_stock_monthly_return(code, year, month)
+        stocks[code] = {"close": close, "atr_pct": atr_pct, "r": monthly_r}
+        ok_count += 1
+        if ok_count <= 5 or ok_count % 20 == 0:
+            print(f"  [{ok_count:3d}] {name}({code}): 종가={close:,.0f}  ATR%={atr_pct}  r={monthly_r:+.2f}%")
+    print(f"  ✅  총 {ok_count}종목 수집 완료")
 
     return {
         "date":   doc_id,
@@ -207,28 +251,89 @@ def save_to_firebase(db, doc_id: str, data: dict):
 #  GDB 고정 데이터에 UDB 신규 월을 더해 누적수익률·MDD 계산
 # ─────────────────────────────────────────────
 
-# GDB ALL_MONTHLY (r값만 순서대로, backtest.js와 동기화)
-GDB_MONTHLY_R = [
-    1.32,1.25,1.76,1.31,2.55,-3.4,-0.97,-4.4,-3.2,-3.92,5.61,
-    -9.19,0.99,1.12,-2.88,-0.15,-13.36,5.25,-0.11,-12.88,6.47,7.16,-9.33,
-    8.99,-0.78,2.3,1.38,3.87,-0.33,2.26,-3.15,-2.39,-6.48,10.75,5.79,
-    -6.08,5.75,5.36,-2.54,-1.89,7.21,-0.92,-4.98,-4.64,-1.58,-4.08,-2.35,
-    4.89,0.28,-0.57,1.91,6.16,15.29,5.79,-1.93,10.21,22.24,-4.39,9.38,
-    26.8,21.46,-7.6,
-]  # 63개월 (21-01 기준점 제외 → 62개 수익률 = 21-02 ~ 26-03)
-
 GDB_LAST_DATE = "26-03"  # yy-mm
+
+# GDB 월별 KOSPI200 + 개별종목 평균 수익률 (backtest.js와 동기화, 21-02~26-03)
+# {r: KOSPI200, stock_r_avg: 200종목 평균} — gdb_stock_data.json 에서 계산
+def build_gdb_monthly_data() -> list:
+    """
+    gdb_stock_data.json을 읽어 월별 {r, stock_r_avg} 리스트 생성.
+    r = KOSPI200 월간 수익률 (GDB_MONTHLY_R 순서 동일)
+    stock_r_avg = 해당 월 200종목 평균 수익률
+    """
+    import pathlib, statistics
+
+    # KOSPI200 월간 수익률 (backtest.js ALL_MONTHLY 의 r값)
+    kospi_r_list = [
+        1.32,1.25,1.76,1.31,2.55,-3.4,-0.97,-4.4,-3.2,-3.92,5.61,
+        -9.19,0.99,1.12,-2.88,-0.15,-13.36,5.25,-0.11,-12.88,6.47,7.16,-9.33,
+        8.99,-0.78,2.3,1.38,3.87,-0.33,2.26,-3.15,-2.39,-6.48,10.75,5.79,
+        -6.08,5.75,5.36,-2.54,-1.89,7.21,-0.92,-4.98,-4.64,-1.58,-4.08,-2.35,
+        4.89,0.28,-0.57,1.91,6.16,15.29,5.79,-1.93,10.21,22.24,-4.39,9.38,
+        26.8,21.46,-7.6,
+    ]  # 62개 (21-02 ~ 26-03)
+
+    # 월 레이블 생성 (21-02 ~ 26-03)
+    months_labels = []
+    y, m = 2021, 2
+    while (y * 100 + m) <= (2026 * 100 + 3):
+        months_labels.append(f"{str(y)[2:]}-{m:02d}")
+        m += 1
+        if m > 12:
+            m = 1
+            y += 1
+
+    # gdb_stock_data.json 로드
+    json_path = pathlib.Path(__file__).parent / "gdb_stock_data.json"
+    if not json_path.exists():
+        # 파일 없으면 KOSPI200 r만 사용 (fallback)
+        print("  ⚠  gdb_stock_data.json 없음 — KOSPI200 r만 사용")
+        return [{"r": r, "stock_r_avg": r} for r in kospi_r_list]
+
+    with open(json_path, encoding="utf-8") as f:
+        gdb_data = json.load(f)
+
+    result = []
+    for i, ym in enumerate(months_labels):
+        kospi_r = kospi_r_list[i] if i < len(kospi_r_list) else 0.0
+        # 해당 월 200종목 수익률 수집
+        stock_rets = []
+        for code, vals in gdb_data.items():
+            r_val = vals.get("monthly", {}).get(ym)
+            if r_val is not None:
+                stock_rets.append(r_val)
+        stock_r_avg = round(statistics.mean(stock_rets), 2) if stock_rets else kospi_r
+        result.append({"date": ym, "r": kospi_r, "stock_r_avg": stock_r_avg})
+
+    return result
+
+
+GDB_MONTHLY_DATA = build_gdb_monthly_data()
 
 
 def load_all_monthly_from_firebase(db_client) -> list:
-    """Firebase /udb 에서 GDB 이후 신규 월 수익률 로드. [{date, r}] 반환."""
+    """
+    Firebase /udb 에서 GDB_LAST 이후 신규 월 데이터 로드.
+    반환: [{date, r, stock_r_avg}]
+      - r          : KOSPI200 월간 수익률
+      - stock_r_avg: 해당 월 200종목 평균 수익률 (UDB stocks 기준)
+    """
     try:
         docs = db_client.collection("udb").stream()
         new_months = []
         for d in docs:
             data = d.to_dict()
             if data.get("date", "") > GDB_LAST_DATE:
-                new_months.append({"date": data["date"], "r": data.get("r", 0)})
+                # 종목별 r 평균 계산
+                stocks = data.get("stocks", {})
+                stock_rets = [v.get("r", 0) for v in stocks.values() if v.get("r") is not None]
+                import statistics
+                stock_r_avg = round(statistics.mean(stock_rets), 2) if stock_rets else data.get("r", 0)
+                new_months.append({
+                    "date":         data["date"],
+                    "r":            data.get("r", 0),
+                    "stock_r_avg":  stock_r_avg,
+                })
         new_months.sort(key=lambda x: x["date"])
         return new_months
     except Exception as e:
@@ -236,59 +341,78 @@ def load_all_monthly_from_firebase(db_client) -> list:
         return []
 
 
-def compute_strategy_kpi(all_r: list) -> dict:
+def compute_strategy_kpi(monthly_data: list) -> dict:
     """
-    GDB + UDB 월간 수익률 리스트로 전략 KPI 계산.
-    backtest.js runBacktest()의 Python 근사치:
-    - upMult=2.1(기본), dnMult=0.35 기반 전략 수익률 추정
-    - 매월 50% 참여율(5슬롯/월 평균) 가정
+    GDB + UDB 월간 데이터로 전략 KPI 계산.
+    backtest.js runBacktestLive() Python 근사치.
+
+    monthly_data: [{"r": KOSPI200_r, "stock_r_avg": 개별종목_평균_r}, ...]
+      - r          : KOSPI200 월간 수익률 (신호 판단용)
+      - stock_r_avg: 해당 월 활성 종목들의 평균 수익률
+                     GDB 기간: gdb_stock_data.json에서 계산
+                     UDB 기간: UDB stocks[code].r 의 평균
+
+    신호 필터 (runBacktestLive와 동일):
+      - ADX 기본 파라미터: adx=30, zscore=2.0, mlThresh=65
+      - sigThreshBase = max(0.8, (adx-20)*0.15) = 1.5
+      - sigThresh     = sigThreshBase × max(0.6, zscore×0.35) = 1.5×0.7 = 1.05
+      - 해당 월 |KOSPI200_r| >= sigThresh 이면 신호 발생
+      - 신호 발생 시: 5슬롯 중 평균 약 3슬롯 참여 (seed 필터 적용 근사)
+
+    수익률 계산:
+      - 실제 개별 종목 수익률(stock_r_avg) 사용
+      - 참여율(holdDays/20 평균 ≈ 0.9) × 슬롯당 참여율
     """
-    UP = 2.1
-    DN = 0.35
-    PARTICIPATION = 0.50   # 월 평균 참여율 추정
-    COST = 0.31 / 2        # 라운드트립의 절반 (월 단위 추정)
-    NSLOTS = 5
+    NSLOTS        = 5
+    PARTICIPATION = 0.85   # 평균 holdDays/20 (19일 보유 기준)
+    SLOT_RATE     = 3.0 / NSLOTS  # 신호 월 평균 3슬롯 참여
+    COST          = 0.31 / 2      # 편도 거래비용
 
-    def monthly_strategy_ret(r):
-        if r >= 5:
-            base = r * (UP * 0.9)
-        elif r >= 2:
-            base = r * (UP * 0.7)
-        elif r >= 0:
-            base = r * 1.1 + 0.4
-        elif r >= -4:
-            base = r * DN - 0.2
-        else:
-            base = r * DN
-        base = max(base, -(3.5 + 0.3))   # hardStop 3.5% 기준
-        base = min(base, 4.0 * 7 + 5)    # trailing 4% 기준
-        base -= COST
-        return base * PARTICIPATION
+    # 신호 임계값 (기본 파라미터 기준)
+    ADX_DEFAULT  = 30
+    ZSCORE_DEFAULT = 2.0
+    sig_base  = max(0.8, (ADX_DEFAULT - 20) * 0.15)  # 1.5
+    sig_thresh = sig_base * max(0.6, ZSCORE_DEFAULT * 0.35)  # 1.05
+    hardstop  = -(3.5 + 0.3)
+    trail_cap = 4.0 * 7 + 5   # trailing 상한
 
-    def calc_kpi(r_list):
-        if len(r_list) < 2:
+    def monthly_strategy_ret(kospi_r, stock_r_avg):
+        """신호 발생 시 해당 월 전략 수익률 (전체 포트폴리오 기준)"""
+        if abs(kospi_r) < sig_thresh:
+            return 0.0   # 신호 없음 → 거래 없음
+
+        # 실제 종목 수익률 기반
+        ret = stock_r_avg * PARTICIPATION
+        ret = max(ret, hardstop)
+        ret = min(ret, trail_cap)
+        ret -= COST
+        # 슬롯 참여율 반영 (전체 포트폴리오 대비)
+        return ret * SLOT_RATE
+
+    def calc_kpi(data_slice):
+        if len(data_slice) < 2:
             return {"totalRet": 0, "annRet": 0, "mdd": 0}
-        v = 100.0
-        pk = 100.0
+        v   = 100.0
+        pk  = 100.0
         max_dd = 0.0
-        for r in r_list:
-            sr = monthly_strategy_ret(r) / NSLOTS
+        for row in data_slice:
+            sr = monthly_strategy_ret(row["r"], row.get("stock_r_avg", row["r"]))
             v *= (1 + sr / 100)
             if v > pk:
                 pk = v
             dd = (v - pk) / pk * 100
             if dd < max_dd:
                 max_dd = dd
-        n = len(r_list)
+        n = len(data_slice)
         total_ret = round((v / 100 - 1) * 100, 1)
-        ann_ret = round((pow(v / 100, 12 / n) - 1) * 100, 1) if n >= 10 else total_ret
+        ann_ret   = round((pow(v / 100, 12 / n) - 1) * 100, 1) if n >= 10 else total_ret
         return {"totalRet": total_ret, "annRet": ann_ret, "mdd": round(max_dd, 1)}
 
-    total_n = len(all_r)
+    total_n = len(monthly_data)
     return {
-        "1년": calc_kpi(all_r[max(0, total_n - 12):]),
-        "3년": calc_kpi(all_r[max(0, total_n - 36):]),
-        "5년": calc_kpi(all_r[max(0, total_n - 60):]),
+        "1년": calc_kpi(monthly_data[max(0, total_n - 12):]),
+        "3년": calc_kpi(monthly_data[max(0, total_n - 36):]),
+        "5년": calc_kpi(monthly_data[max(0, total_n - 60):]),
     }
 
 
@@ -412,8 +536,8 @@ def main():
     # ── 전략 KPI 재계산 → /config/kpi 저장 ──
     print("\n📊  전략 KPI 재계산 중...")
     udb_new = load_all_monthly_from_firebase(db)
-    all_r = list(GDB_MONTHLY_R) + [u["r"] for u in udb_new]
-    kpi = compute_strategy_kpi(all_r)
+    monthly_data = list(GDB_MONTHLY_DATA) + udb_new
+    kpi = compute_strategy_kpi(monthly_data)
 
     # ── KPI 수치 일치 검증 (Python 계산 vs Firebase 기존 JS 계산) ──
     existing_kpi = load_kpi_from_firebase(db)
