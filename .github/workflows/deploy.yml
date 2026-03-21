@@ -1,0 +1,59 @@
+# ══════════════════════════════════════════════════════════════
+#  SmartSwing-NH  ·  자동 빌드 + GitHub Pages 배포
+#
+#  트리거: main 브랜치 push 시마다 자동 실행
+#  결과:  https://plnman.github.io/smartswing-nh/
+# ══════════════════════════════════════════════════════════════
+name: Build & Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:   # 수동 실행 버튼
+
+permissions:
+  contents: read
+  pages:    write
+  id-token: write
+
+# 동시 배포 방지 (진행 중 배포 있으면 대기, 오래된 것은 취소)
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: "🔨 Vite 빌드"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Node.js 설치
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: 의존성 설치
+        run: npm ci
+
+      - name: Vite 빌드
+        run: npm run build
+
+      - name: Pages 아티팩트 업로드
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    name: "🚀 GitHub Pages 배포"
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: GitHub Pages 배포
+        id: deployment
+        uses: actions/deploy-pages@v4
