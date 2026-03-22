@@ -31,6 +31,30 @@ KPI_FALLBACK = {
     "5년": {"totalRet": 1246.5,"annRet": 68.2,  "mdd": -1.7},
 }
 
+def load_holdings_from_firebase() -> set:
+    """
+    Firebase /holdings 에서 현재 보유 종목 코드 집합 반환.
+    실패 시 빈 set 반환 (→ 청산신호 전체 미전송보다 안전).
+    """
+    cred_json = os.environ.get("FIREBASE_CREDENTIALS")
+    if not cred_json:
+        return set()
+    try:
+        import firebase_admin
+        from firebase_admin import credentials as fb_cred, firestore as fb_fs
+        if not firebase_admin._apps:
+            cred = fb_cred.Certificate(json.loads(cred_json))
+            firebase_admin.initialize_app(cred)
+        db = fb_fs.client()
+        docs = db.collection("holdings").stream()
+        codes = {d.id for d in docs}
+        print(f"  ✅ 보유 종목 로드: {codes if codes else '없음'}")
+        return codes
+    except Exception as e:
+        print(f"  ⚠ holdings 로드 실패: {e}")
+        return set()
+
+
 def load_kpi_from_firebase():
     """Firebase /config/kpi 에서 최신 전략 KPI 로드. 실패 시 fallback 반환."""
     cred_json = os.environ.get("FIREBASE_CREDENTIALS")
@@ -239,7 +263,8 @@ def get_real_signals(today: datetime.datetime):
 # ─────────────────────────────────────────────
 #  메시지 빌드
 # ─────────────────────────────────────────────
-def build_message(today, signals, exits, signal_date, kpi_data=None, is_fallback=False):
+def build_message(today, signals, exits, signal_date, kpi_data=None,
+                  is_fallback=False, holdings: set = None):
     date_str = today.strftime("%Y-%m-%d")
     time_str = today.strftime("%H:%M")
 
@@ -271,14 +296,23 @@ def build_message(today, signals, exits, signal_date, kpi_data=None, is_fallback
         lines.append("─ 매수 신호 없음")
     lines.append("")
 
-    # 청산 후보
-    lines.append("<b>[ 청산 후보 (RSI-2 과매수) ]</b>")
-    if exits:
-        for e in exits:
-            lines.append(f"⬇ {e['name']}({e['code']})  RSI-2={e['rsi2']}  → {e['exit']}")
+    # 청산 후보 — 보유 종목만 표시
+    held_exits  = [e for e in exits if holdings and e["code"] in holdings]
+    other_exits = [e for e in exits if not holdings or e["code"] not in holdings]
+
+    lines.append("<b>[ 청산 후보 (보유 종목 · RSI-2 과매수) ]</b>")
+    if held_exits:
+        for e in held_exits:
+            lines.append(f"⬇ {e['name']}({e['code']})  RSI-2={e['rsi2']}  → 매도 검토")
     else:
         lines.append("─ 없음")
     lines.append("")
+
+    # 기타 — 미보유 과매수 신호 (참고용, 소형)
+    if other_exits:
+        names = ", ".join(f"{e['name']}" for e in other_exits)
+        lines.append(f"<i>ℹ 미보유 RSI≥99 (참고): {names}</i>")
+        lines.append("")
 
     # KPI (Firebase live 값 반영)
     kpi = kpi_map.get("5년", KPI_FALLBACK["5년"])
@@ -419,14 +453,16 @@ def main():
         print("주말 — 알림 건너뜀")
         return
 
-    # Firebase에서 최신 전략 KPI 로드 (TabBacktest.jsx가 저장한 live 계산값)
-    print("🔥 Firebase /config/kpi 로드 중...")
+    # Firebase에서 최신 전략 KPI + 보유 종목 로드
+    print("🔥 Firebase 로드 중...")
     kpi_data = load_kpi_from_firebase()
+    holdings = load_holdings_from_firebase()   # 보유 종목 코드 set
 
     print("📡 pykrx 실시간 데이터 수집 중...")
     signals, exits, signal_date, prices, is_fallback = get_real_signals(today)
 
-    msg = build_message(today, signals, exits, signal_date, kpi_data, is_fallback)
+    msg = build_message(today, signals, exits, signal_date,
+                        kpi_data, is_fallback, holdings)
     print("─── 전송 메시지 ───")
     print(msg)
     print("──────────────────")
