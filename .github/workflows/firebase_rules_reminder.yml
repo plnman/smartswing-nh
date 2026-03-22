@@ -1,0 +1,49 @@
+# ══════════════════════════════════════════════════════════════
+#  Firebase 보안 규칙 만료 알림
+#  - 2026-12-01 (만료 30일 전) 텔레그램 알림 발송
+#  - 2026-12-15 (만료 16일 전) 재알림
+#  - 2026-12-25 (만료 6일 전)  최종 알림
+# ══════════════════════════════════════════════════════════════
+name: Firebase Rules Expiry Reminder
+
+on:
+  schedule:
+    - cron: "0 9 1 12 *"   # 12월 1일 오전 9시 KST (UTC 00:00)
+    - cron: "0 9 15 12 *"  # 12월 15일 오전 9시 KST
+    - cron: "0 9 25 12 *"  # 12월 25일 오전 9시 KST
+  workflow_dispatch:        # 수동 테스트용
+
+jobs:
+  notify:
+    name: "🔔 Firebase 규칙 만료 알림"
+    runs-on: ubuntu-latest
+    steps:
+      - name: 만료 D-Day 계산
+        id: dday
+        run: |
+          EXPIRE="2026-12-31"
+          TODAY=$(date +%Y-%m-%d)
+          DAYS=$(( ( $(date -d "$EXPIRE" +%s) - $(date -d "$TODAY" +%s) ) / 86400 ))
+          echo "days=$DAYS" >> $GITHUB_OUTPUT
+          echo "today=$TODAY" >> $GITHUB_OUTPUT
+
+      - name: 텔레그램 알림 발송
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          DAYS_LEFT: ${{ steps.dday.outputs.days }}
+        run: |
+          MESSAGE="🔥 <b>Firebase 보안 규칙 만료 임박!</b>
+
+📅 만료일: <b>2026-12-31</b>
+⏳ 남은 기간: <b>${DAYS_LEFT}일</b>
+
+Firebase Console에서 보안 규칙을 갱신해 주세요.
+https://console.firebase.google.com/project/smartswing-nh/firestore/databases/-default-/security/rules
+
+규칙 예시:
+<code>allow read, write: if request.time &lt; timestamp.date(2027, 12, 31);</code>"
+
+          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d "{\"chat_id\": \"${CHAT_ID}\", \"text\": \"${MESSAGE}\", \"parse_mode\": \"HTML\"}"
