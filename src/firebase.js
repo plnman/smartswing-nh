@@ -1,23 +1,22 @@
 // ════════════════════════════════════════════════════════════════════════
 // Firebase 설정 — SmartSwing-NH 전용 앱
-// Firebase 프로젝트: aidash-d831b (기존 AIDASH 프로젝트 재사용)
-// 앱 이름: SMARTSWING_NH (AI_DASHBOARD 와 완전 별개)
+// Firebase 프로젝트: smartswing-nh (전용 프로젝트, 2026-03-22 분리)
 // ════════════════════════════════════════════════════════════════════════
 import { initializeApp } from "firebase/app";
 import { getFirestore } from "firebase/firestore";
 
-// ✅ 2026-03-21 SMARTSWING_NH 앱 등록 완료 — config 적용
+// ✅ 2026-03-22 aidash-d831b → smartswing-nh 전용 프로젝트 분리 완료
 const firebaseConfig = {
-  apiKey:            "AIzaSyCrcfv5AKFmNneeMrNuQpWq79YsEXQJk54",
-  authDomain:        "aidash-d831b.firebaseapp.com",
-  projectId:         "aidash-d831b",
-  storageBucket:     "aidash-d831b.firebasestorage.app",
-  messagingSenderId: "718233578258",
-  appId:             "1:718233578258:web:35609f5513b306f14021cb",
-  measurementId:     "G-YMWR5RV7BH",
+  apiKey:            "AIzaSyB2Rdp_JG9uHUKaMM1yxdx33vYQAovF31Y",
+  authDomain:        "smartswing-nh.firebaseapp.com",
+  projectId:         "smartswing-nh",
+  storageBucket:     "smartswing-nh.firebasestorage.app",
+  messagingSenderId: "490550961706",
+  appId:             "1:490550961706:web:0b6e249322d95471414553",
+  measurementId:     "G-7SB3SYV801",
 };
 
-const app = initializeApp(firebaseConfig, "smartswing-nh"); // 2번째 인자: 앱 이름 (AI_DASHBOARD 와 충돌 방지)
+const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app);
 
 // ── Firestore 컬렉션 경로 상수 ──────────────────────────────────────────
