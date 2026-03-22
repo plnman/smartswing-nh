@@ -3,7 +3,7 @@ import TabBacktest  from "./tabs/TabBacktest.jsx";
 import TabLiveSim   from "./tabs/TabLiveSim.jsx";
 import TabTrades    from "./tabs/TabTrades.jsx";
 import TabStrategy  from "./tabs/TabStrategy.jsx";
-import { DEFAULT_PARAMS, KPI_BY_PERIOD, runBacktest } from "./backtest.js";
+import { DEFAULT_PARAMS, runBacktest } from "./backtest.js";
 
 // ── 탭 정의 (id 3 배지는 App에서 동적 렌더링)
 const TABS = [
@@ -81,15 +81,9 @@ export default function App() {
             <span className="text-slate-700">|</span>
             <span className="text-xs font-mono text-slate-500">GDB 동결 2026-03-21</span>
           </div>
-          <div className="flex items-center gap-4">
-            <div className="text-right text-[10px] text-slate-500 leading-relaxed">
-              <div>5년 누적 <span className="text-emerald-400 font-bold">+{KPI_BY_PERIOD["5년"].totalRet}%</span></div>
-              <div>연환산 <span className="text-emerald-300">+{KPI_BY_PERIOD["5년"].annRet}%</span></div>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"/>
-              <span className="text-xs text-slate-400">Simulation Mode</span>
-            </div>
+          <div className="flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"/>
+            <span className="text-xs text-slate-400">Simulation Mode</span>
           </div>
         </div>
       </header>
