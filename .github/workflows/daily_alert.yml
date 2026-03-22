@@ -79,7 +79,9 @@ jobs:
 
       - name: 15:40 KST Firebase UDB 업데이트
         env:
-          FIREBASE_CREDENTIALS: ${{ secrets.FIREBASE_CREDENTIALS }}
+          FIREBASE_CREDENTIALS:  ${{ secrets.FIREBASE_CREDENTIALS }}
+          TELEGRAM_BOT_TOKEN:    ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:      ${{ secrets.TELEGRAM_CHAT_ID }}
           # 수동 실행 시 당월 강제 업데이트
           FORCE_RUN: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}
         run: python3 scripts/update_udb.py

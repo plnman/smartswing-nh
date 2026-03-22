@@ -12,6 +12,46 @@ import { collection, getDocs, orderBy, query } from "firebase/firestore";
 
 const BASE_CAPITAL = 50_000_000; // 5천만원
 
+// ── CSV 다운로드 유틸
+function downloadCsv(trades) {
+  const headers = [
+    "매도일", "종목명", "종목코드", "슬롯",
+    "매수일", "매수가", "매도가", "수량", "투자금",
+    "진입RSI-2", "진입ADX",
+    "실수익률(%)", "손익(원)",
+  ];
+  const rows = [...trades].reverse().map(t => {
+    const pnl = t.qty
+      ? Math.round((t.sellPrice - t.buyPrice) * t.qty - t.buyPrice * t.qty * 0.0031)
+      : "";
+    return [
+      t.date          ?? t.sellDate ?? "",
+      t.stock?.name   ?? "",
+      t.stock?.code   ?? "",
+      t.slot          ?? "",
+      t.buyDate       ?? "",
+      t.buyPrice      ?? "",
+      t.sellPrice     ?? "",
+      t.qty           ?? "",
+      t.buyAmount     ?? "",
+      t.entryRsi2     ?? "",
+      t.entryAdx      ?? "",
+      t.actualRet     ?? "",
+      pnl,
+    ].map(v => `"${String(v).replace(/"/g, '""')}"`).join(",");
+  });
+  const bom  = "\uFEFF"; // 한글 깨짐 방지
+  const csv  = bom + [headers.join(","), ...rows].join("\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement("a");
+  const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+  a.href     = url;
+  a.download = `smartswing_trades_${date}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 const krw = v => {
   const abs = Math.abs(v), sign = v >= 0 ? "+" : "-";
   if (abs >= 100_000_000) return sign + (abs / 100_000_000).toFixed(2) + "억";
@@ -139,6 +179,19 @@ export default function TabTrades() {
           <span className="text-xs bg-slate-700 text-slate-400 px-2 py-0.5 rounded-full">
             {trades.length}건
           </span>
+          {trades.length > 0 && (
+            <button
+              onClick={() => downloadCsv(trades)}
+              className="ml-auto flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold
+                rounded-lg transition-all bg-emerald-800 hover:bg-emerald-700 text-emerald-200"
+            >
+              <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="currentColor">
+                <path d="M8 12l-4-4h2.5V3h3v5H12L8 12z"/>
+                <path d="M2 13h12v1.5H2V13z"/>
+              </svg>
+              엑셀 다운로드
+            </button>
+          )}
         </div>
         {trades.length === 0 ? (
           <div className="p-8 text-center text-slate-600 text-sm">거래 기록 없음</div>
@@ -146,29 +199,56 @@ export default function TabTrades() {
           <table className="w-full text-xs">
             <thead>
               <tr className="text-slate-500 border-b border-slate-700">
-                <th className="px-4 py-2 text-left">날짜</th>
-                <th className="px-4 py-2 text-left">종목</th>
-                <th className="px-4 py-2 text-right">매수가</th>
-                <th className="px-4 py-2 text-right">매도가</th>
-                <th className="px-4 py-2 text-right">수량</th>
-                <th className="px-4 py-2 text-right">실수익률</th>
-                <th className="px-4 py-2 text-right">손익</th>
+                <th className="px-3 py-2 text-left">매도일</th>
+                <th className="px-3 py-2 text-left">종목</th>
+                <th className="px-3 py-2 text-right">매수일</th>
+                <th className="px-3 py-2 text-right">매수가</th>
+                <th className="px-3 py-2 text-right">매도가</th>
+                <th className="px-3 py-2 text-right">수량</th>
+                <th className="px-3 py-2 text-right">진입조건</th>
+                <th className="px-3 py-2 text-right">실수익률</th>
+                <th className="px-3 py-2 text-right">손익</th>
               </tr>
             </thead>
             <tbody>
               {[...trades].reverse().map(t => {
-                const pnl = t.qty ? (t.sellPrice - t.buyPrice) * t.qty - (t.buyPrice * t.qty * 0.0031) : null;
+                const pnl = t.qty
+                  ? Math.round((t.sellPrice - t.buyPrice) * t.qty - t.buyPrice * t.qty * 0.0031)
+                  : null;
                 return (
                   <tr key={t.id} className="border-b border-slate-800 hover:bg-slate-700/30">
-                    <td className="px-4 py-2 text-slate-400">{t.date}</td>
-                    <td className="px-4 py-2 font-medium">{t.stock?.name || "—"}</td>
-                    <td className="px-4 py-2 text-right text-slate-300">{t.buyPrice?.toLocaleString()}</td>
-                    <td className="px-4 py-2 text-right text-slate-300">{t.sellPrice?.toLocaleString()}</td>
-                    <td className="px-4 py-2 text-right text-slate-500">{t.qty || "—"}</td>
-                    <td className={`px-4 py-2 text-right font-bold ${t.actualRet >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                    <td className="px-3 py-2 text-slate-400">{t.date ?? t.sellDate ?? "—"}</td>
+                    <td className="px-3 py-2 font-medium">
+                      <span>{t.stock?.name || "—"}</span>
+                      {t.slot && (
+                        <span className="ml-1 text-[10px] text-indigo-400">S{t.slot}</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-right text-slate-500 text-[11px]">
+                      {t.buyDate ?? "—"}
+                    </td>
+                    <td className="px-3 py-2 text-right text-slate-300">
+                      {t.buyPrice?.toLocaleString() ?? "—"}
+                    </td>
+                    <td className="px-3 py-2 text-right text-slate-300">
+                      {t.sellPrice?.toLocaleString() ?? "—"}
+                    </td>
+                    <td className="px-3 py-2 text-right text-slate-500">{t.qty ?? "—"}</td>
+                    <td className="px-3 py-2 text-right">
+                      {t.entryRsi2 != null ? (
+                        <span className="font-mono text-[10px] text-slate-500">
+                          R{t.entryRsi2} A{t.entryAdx}
+                        </span>
+                      ) : "—"}
+                    </td>
+                    <td className={`px-3 py-2 text-right font-bold ${
+                      t.actualRet >= 0 ? "text-emerald-400" : "text-red-400"
+                    }`}>
                       {t.actualRet >= 0 ? "+" : ""}{t.actualRet}%
                     </td>
-                    <td className={`px-4 py-2 text-right ${pnl && pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                    <td className={`px-3 py-2 text-right ${
+                      pnl != null && pnl >= 0 ? "text-emerald-400" : "text-red-400"
+                    }`}>
                       {pnl !== null ? krw(pnl) : "—"}
                     </td>
                   </tr>

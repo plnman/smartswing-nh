@@ -428,6 +428,41 @@ def load_kpi_from_firebase(db_client):
         return None
 
 
+def _send_kpi_alert(warn_lines: list):
+    """KPI 편차 초과 시 Telegram 알림 전송."""
+    bot   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat  = os.environ.get("TELEGRAM_CHAT_ID",   "")
+    if not bot or not chat:
+        print("  ℹ️  Telegram 환경변수 없음 — 알림 건너뜀")
+        return
+    now = __import__("datetime").datetime.now(
+        __import__("datetime").timezone(__import__("datetime").timedelta(hours=9))
+    ).strftime("%Y-%m-%d %H:%M KST")
+    text = "\n".join([
+        "🚨 <b>SmartSwing KPI 불일치 경고</b>",
+        f"⏰ {now}",
+        "",
+        "Python 근사치 vs Firebase(JS) 계산값이",
+        "허용 편차를 초과했습니다.",
+        "",
+        "📊 초과 항목:",
+    ] + [f"  {l}" for l in warn_lines] + [
+        "",
+        "⚠️ 데이터 파이프라인 또는",
+        "파라미터 불일치 여부를 확인하세요.",
+    ])
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{bot}/sendMessage",
+            json={"chat_id": chat, "text": text, "parse_mode": "HTML"},
+            timeout=10,
+        )
+        r.raise_for_status()
+        print("  🚨  KPI 불일치 Telegram 알림 전송 완료")
+    except Exception as e:
+        print(f"  ⚠  Telegram 알림 전송 실패: {e}")
+
+
 def verify_kpi_consistency(py_kpi, js_kpi):
     """
     Python 계산 KPI vs Firebase 저장 KPI (JS 계산) 수치 일치 검증.
@@ -437,14 +472,14 @@ def verify_kpi_consistency(py_kpi, js_kpi):
     임계값 초과 시 경고 출력.
 
     허용 편차 (근사치 알고리즘 차이 감안):
-      totalRet: ±40%p
-      annRet  : ±30%p
-      mdd     : ±10%p
+      totalRet: ±20%p
+      annRet  : ±15%p
+      mdd     : ±5%p
     """
     THRESHOLDS = {
-        "totalRet": 40.0,
-        "annRet":   30.0,
-        "mdd":      10.0,
+        "totalRet": 20.0,
+        "annRet":   15.0,
+        "mdd":       5.0,
     }
 
     print("\n🔍  KPI 수치 일치 검증 (Python 계산 vs Firebase 저장값)")
@@ -460,6 +495,7 @@ def verify_kpi_consistency(py_kpi, js_kpi):
     print(f"  Firebase 기존값: source={js_source}  updatedAt={js_updated}")
 
     any_warn = False
+    warn_lines = []
     for period in ("1년", "3년", "5년"):
         py = py_kpi.get(period, {})
         js = js_kpi.get(period, {})
@@ -478,6 +514,7 @@ def verify_kpi_consistency(py_kpi, js_kpi):
             if diff > thr:
                 row_ok = False
                 any_warn = True
+                warn_lines.append(f"[{period}] {metric}: py={py_v:+.1f}% js={js_v:+.1f}% Δ={diff:.1f}%p")
             details.append(f"{metric}: py={py_v:+.1f}% js={js_v:+.1f}% Δ={diff:.1f}%p [{flag}]")
 
         status = "✅" if row_ok else "❌"
@@ -488,6 +525,7 @@ def verify_kpi_consistency(py_kpi, js_kpi):
     print("─" * 60)
     if any_warn:
         print("  ❌  경고: 임계값 초과 편차 감지! 데이터 이상 여부 확인 필요.")
+        _send_kpi_alert(warn_lines)
     else:
         print("  ✅  모든 기간 허용 편차 이내 — 정상")
     print()

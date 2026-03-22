@@ -14,7 +14,7 @@ import React, { useState, useEffect } from "react";
 import { db, COL } from "../firebase.js";
 import {
   collection, doc, getDoc, getDocs,
-  setDoc, deleteDoc,
+  setDoc, deleteDoc, addDoc,
 } from "firebase/firestore";
 
 // ── GitHub 설정 (재실행 버튼용)
@@ -48,6 +48,10 @@ export default function TabLiveSim() {
   // 매수 등록 모달
   const [addModal, setAddModal] = useState(null);     // signal 객체
   const [addForm,  setAddForm]  = useState({ entry_price: "", qty: "" });
+
+  // 매도 완료 모달
+  const [sellModal, setSellModal] = useState(null);   // holding 객체
+  const [sellForm,  setSellForm]  = useState({ sell_price: "", sell_date: "" });
 
   const todayKey  = getKSTDateKey();
   const todayDisp = getKSTDateDisp();
@@ -151,14 +155,56 @@ export default function TabLiveSim() {
     setAddForm({ entry_price: "", qty: "" });
   };
 
-  // ── 매도 완료 (보유 제거)
-  const handleRemoveHolding = async (code) => {
-    await deleteDoc(doc(db, COL.HOLDINGS, code));
+  // ── 매도 완료 버튼 → 모달 열기
+  const handleSellClick = (code) => {
+    const h = holdings[code];
+    if (!h) return;
+    setSellModal({ ...h, code });
+    setSellForm({ sell_price: "", sell_date: todayDisp });
+  };
+
+  // ── 매도 확정 → /trades 저장 + holding 삭제
+  const handleConfirmSell = async () => {
+    if (!sellModal) return;
+    const sellPrice = parseFloat(sellForm.sell_price);
+    if (!sellPrice || sellPrice <= 0) return;
+
+    const h          = sellModal;
+    const actualRet  = +((sellPrice / h.entry_price - 1) * 100 - 0.31).toFixed(2);
+    const pnl        = Math.round((sellPrice - h.entry_price) * h.qty
+                         - h.entry_price * h.qty * 0.0031);
+
+    const tradeDoc = {
+      // 기본 정보
+      date:        sellForm.sell_date || todayDisp,
+      stock:       { name: h.name, code: h.code },
+      slot:        h.slot,
+
+      // 매수 조건 (진입 시점 스냅샷)
+      buyPrice:    h.entry_price,
+      buyDate:     h.entry_date,
+      qty:         h.qty,
+      buyAmount:   h.amount,
+      entryRsi2:   h.rsi2,
+      entryAdx:    h.adx,
+
+      // 매도 결과
+      sellPrice,
+      sellDate:    sellForm.sell_date || todayDisp,
+      actualRet,
+      pnl,
+
+      createdAt:   new Date().toISOString(),
+    };
+
+    await addDoc(collection(db, COL.TRADES), tradeDoc);
+    await deleteDoc(doc(db, COL.HOLDINGS, h.code));
     setHoldings(prev => {
       const next = { ...prev };
-      delete next[code];
+      delete next[h.code];
       return next;
     });
+    setSellModal(null);
   };
 
   // ── 로딩
@@ -315,7 +361,7 @@ export default function TabLiveSim() {
               RSI-2 = {e.rsi2} ≥ 99
             </span>
             <button
-              onClick={() => handleRemoveHolding(e.code)}
+              onClick={() => handleSellClick(e.code)}
               className="px-3 py-1 text-xs font-semibold rounded-lg shrink-0 transition-all
                 bg-red-900 hover:bg-red-800 text-red-200"
             >
@@ -394,7 +440,7 @@ export default function TabLiveSim() {
                   </div>
                 </div>
                 <button
-                  onClick={() => handleRemoveHolding(h.code)}
+                  onClick={() => handleSellClick(h.code)}
                   className="px-3 py-1.5 text-xs rounded-lg shrink-0 transition-all
                     bg-slate-700 hover:bg-red-900 text-slate-400 hover:text-red-200"
                 >
@@ -505,6 +551,103 @@ export default function TabLiveSim() {
           </div>
         </div>
       )}
+
+      {/* ── 매도 완료 모달 */}
+      {sellModal && (() => {
+        const sp = parseFloat(sellForm.sell_price);
+        const ret = sp && sellModal.entry_price
+          ? +((sp / sellModal.entry_price - 1) * 100 - 0.31).toFixed(2)
+          : null;
+        return (
+          <div
+            className="fixed inset-0 bg-black/70 flex items-center justify-center z-50"
+            onClick={() => setSellModal(null)}
+          >
+            <div
+              className="bg-slate-800 border border-slate-600 rounded-2xl p-6 w-80 space-y-4"
+              onClick={e => e.stopPropagation()}
+            >
+              <div>
+                <h3 className="font-bold text-slate-200 text-base">매도 완료 등록</h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  {sellModal.name} ({sellModal.code}) · 슬롯{sellModal.slot}
+                </p>
+                <div className="mt-1 flex flex-wrap gap-2 text-[11px]">
+                  <span className="px-1.5 py-0.5 rounded bg-slate-700 text-slate-400 font-mono">
+                    매수 {sellModal.entry_date}
+                  </span>
+                  <span className="px-1.5 py-0.5 rounded bg-slate-700 text-slate-400 font-mono">
+                    진입가 ₩{sellModal.entry_price?.toLocaleString()}
+                  </span>
+                  <span className="px-1.5 py-0.5 rounded bg-slate-700 text-emerald-400 font-mono">
+                    RSI-2={sellModal.rsi2}
+                  </span>
+                  <span className="px-1.5 py-0.5 rounded bg-slate-700 text-sky-400 font-mono">
+                    ADX={sellModal.adx}
+                  </span>
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <div>
+                  <label className="text-xs text-slate-400 mb-1 block">실제 매도가 (원)</label>
+                  <input
+                    type="number"
+                    value={sellForm.sell_price}
+                    onChange={e => setSellForm(f => ({ ...f, sell_price: e.target.value }))}
+                    className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2
+                      text-sm text-slate-200 focus:outline-none focus:border-red-500"
+                    placeholder="매도 체결가 입력"
+                    autoFocus
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-slate-400 mb-1 block">매도일</label>
+                  <input
+                    type="date"
+                    value={sellForm.sell_date}
+                    onChange={e => setSellForm(f => ({ ...f, sell_date: e.target.value }))}
+                    className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2
+                      text-sm text-slate-200 focus:outline-none focus:border-red-500"
+                  />
+                </div>
+
+                {ret !== null && (
+                  <div className={`text-xs bg-slate-700/50 rounded px-3 py-2 font-bold ${
+                    ret >= 0 ? "text-emerald-400" : "text-red-400"
+                  }`}>
+                    예상 실수익률: {ret >= 0 ? "+" : ""}{ret}%
+                    &nbsp;·&nbsp;
+                    손익: ₩{Math.round(
+                      (sp - sellModal.entry_price) * sellModal.qty
+                      - sellModal.entry_price * sellModal.qty * 0.0031
+                    ).toLocaleString()}
+                  </div>
+                )}
+              </div>
+
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setSellModal(null)}
+                  className="flex-1 px-4 py-2 text-sm rounded-lg transition-all
+                    bg-slate-700 hover:bg-slate-600 text-slate-300"
+                >
+                  취소
+                </button>
+                <button
+                  onClick={handleConfirmSell}
+                  disabled={!sellForm.sell_price}
+                  className="flex-1 px-4 py-2 text-sm font-semibold rounded-lg transition-all
+                    bg-red-700 hover:bg-red-600
+                    disabled:bg-slate-700 disabled:text-slate-600 text-white"
+                >
+                  매도 확정
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
