@@ -185,9 +185,11 @@ export function runBacktest(period, params, customRange = null) {
     const ei = EQUITY_CURVE_RAW.findIndex(e => e.d === customRange.end);
     raw = (si >= 0 && ei >= si) ? EQUITY_CURVE_RAW.slice(si, ei + 1) : EQUITY_CURVE_RAW;
     nMonths = raw.length;
-    // ★ Fix: monthly도 날짜 기준으로 자름 (기존: 끝에서 nMonths개 → 잘못된 기간)
-    const msi = ALL_MONTHLY.findIndex(m => m.date === customRange.start);
-    const mei = ALL_MONTHLY.findIndex(m => m.date === customRange.end);
+    // ★ Fix v2: monthly 날짜 기준 슬라이스 (start가 ALL_MONTHLY에 없으면 >= start 첫 항목 사용)
+    let msi = ALL_MONTHLY.findIndex(m => m.date === customRange.start);
+    if (msi < 0) msi = ALL_MONTHLY.findIndex(m => m.date >= customRange.start);
+    let mei = ALL_MONTHLY.findIndex(m => m.date === customRange.end);
+    if (mei < 0) { for (let j = ALL_MONTHLY.length - 1; j >= 0; j--) { if (ALL_MONTHLY[j].date <= customRange.end) { mei = j; break; } } }
     monthly = (msi >= 0 && mei >= msi)
       ? ALL_MONTHLY.slice(msi, mei + 1)
       : ALL_MONTHLY.slice(Math.max(0, ALL_MONTHLY.length - (nMonths - 1)));
@@ -474,9 +476,11 @@ export function runBacktestLive(period, params, customRange = null, liveData = n
     const ei = _curve.findIndex(e => e.d === customRange.end);
     raw = (si >= 0 && ei >= si) ? _curve.slice(si, ei + 1) : _curve;
     nMonths = raw.length;
-    // ★ Fix: monthly도 날짜 기준으로 자름 (기존: 끝에서 nMonths개 → 잘못된 기간)
-    const msi = _monthly.findIndex(m => m.date === customRange.start);
-    const mei = _monthly.findIndex(m => m.date === customRange.end);
+    // ★ Fix v2: monthly 날짜 기준 슬라이스 (start가 _monthly에 없으면 >= start 첫 항목 사용)
+    let msi = _monthly.findIndex(m => m.date === customRange.start);
+    if (msi < 0) msi = _monthly.findIndex(m => m.date >= customRange.start);
+    let mei = _monthly.findIndex(m => m.date === customRange.end);
+    if (mei < 0) { for (let j = _monthly.length - 1; j >= 0; j--) { if (_monthly[j].date <= customRange.end) { mei = j; break; } } }
     monthly = (msi >= 0 && mei >= msi)
       ? _monthly.slice(msi, mei + 1)
       : _monthly.slice(Math.max(0, _monthly.length - (nMonths - 1)));
