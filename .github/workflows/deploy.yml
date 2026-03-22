@@ -36,7 +36,7 @@ jobs:
       - name: 의존성 설치
         run: npm install
 
-    - name: Vite 빌드
+      - name: Vite 빌드
         env:
           VITE_TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           VITE_TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}

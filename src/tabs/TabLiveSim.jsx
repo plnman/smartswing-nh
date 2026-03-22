@@ -175,8 +175,10 @@ export default function TabLiveSim() {
     );
   }
 
-  const signals = daily?.signals || [];
-  const exits   = daily?.exits   || [];
+  const signals    = daily?.signals || [];
+  const exits      = daily?.exits   || [];
+  const heldExits  = exits.filter(e => !!holdings[e.code]);   // 보유 중 → 청산 권고
+  const otherExits = exits.filter(e => !holdings[e.code]);    // 미보유 → 기타 정보
   const t1Date  = daily?.t1_date;
   const runAt   = daily?.run_at;
 
@@ -291,54 +293,64 @@ export default function TabLiveSim() {
         })}
       </SignalSection>
 
-      {/* ── 청산 후보 */}
+      {/* ── 청산 후보 (보유 종목만) */}
       <SignalSection
         title="⬇ 청산 후보"
-        count={exits.length}
+        count={heldExits.length}
         countColor="bg-red-900/60 text-red-300"
-        badge="RSI-2 ≥ 99 과매수 감지"
+        badge="RSI-2 ≥ 99 과매수 감지 · 보유 종목만"
         empty="청산 후보 없음"
       >
-        {exits.map((e, i) => {
-          const held = !!holdings[e.code];
-          return (
-            <div key={i} className="p-3 flex items-center gap-3">
-              {held ? (
-                <span className="px-2.5 py-1 rounded-lg text-xs font-bold shrink-0
-                  bg-red-900/60 text-red-300 border border-red-700/50">
-                  ⚠ 청산 권고
-                </span>
-              ) : (
-                <span className="px-2.5 py-1 rounded-lg text-xs shrink-0
-                  bg-slate-700/50 text-slate-500 border border-slate-600/50">
-                  참고
-                </span>
-              )}
+        {heldExits.map((e, i) => (
+          <div key={i} className="p-3 flex items-center gap-3">
+            <span className="px-2.5 py-1 rounded-lg text-xs font-bold shrink-0
+              bg-red-900/60 text-red-300 border border-red-700/50">
+              ⚠ 청산 권고
+            </span>
+            <div className="flex-1 min-w-0">
+              <span className="font-bold text-sm text-slate-200">{e.name}</span>
+              <span className="text-xs text-slate-600 ml-2">{e.code}</span>
+            </div>
+            <span className="font-mono text-[11px] text-red-400 px-2 py-0.5 rounded bg-slate-700 shrink-0">
+              RSI-2 = {e.rsi2} ≥ 99
+            </span>
+            <button
+              onClick={() => handleRemoveHolding(e.code)}
+              className="px-3 py-1 text-xs font-semibold rounded-lg shrink-0 transition-all
+                bg-red-900 hover:bg-red-800 text-red-200"
+            >
+              매도 완료
+            </button>
+          </div>
+        ))}
+      </SignalSection>
 
+      {/* ── 기타 정보 (미보유 과매수 신호) */}
+      {otherExits.length > 0 && (
+        <SignalSection
+          title="ℹ 기타 정보"
+          count={otherExits.length}
+          countColor="bg-slate-700 text-slate-400"
+          badge="미보유 종목 RSI-2 ≥ 99 — 참고용"
+          empty=""
+        >
+          {otherExits.map((e, i) => (
+            <div key={i} className="p-3 flex items-center gap-3 opacity-50">
+              <span className="px-2.5 py-1 rounded-lg text-xs shrink-0
+                bg-slate-700/50 text-slate-500 border border-slate-600/50">
+                미보유
+              </span>
               <div className="flex-1 min-w-0">
-                <span className={`font-bold text-sm ${held ? "text-slate-200" : "text-slate-500"}`}>
-                  {e.name}
-                </span>
+                <span className="font-bold text-sm text-slate-500">{e.name}</span>
                 <span className="text-xs text-slate-600 ml-2">{e.code}</span>
               </div>
-
-              <span className="font-mono text-[11px] text-red-400 px-2 py-0.5 rounded bg-slate-700 shrink-0">
+              <span className="font-mono text-[11px] text-slate-500 px-2 py-0.5 rounded bg-slate-800 shrink-0">
                 RSI-2 = {e.rsi2} ≥ 99
               </span>
-
-              {held && (
-                <button
-                  onClick={() => handleRemoveHolding(e.code)}
-                  className="px-3 py-1 text-xs font-semibold rounded-lg shrink-0 transition-all
-                    bg-red-900 hover:bg-red-800 text-red-200"
-                >
-                  매도 완료
-                </button>
-              )}
             </div>
-          );
-        })}
-      </SignalSection>
+          ))}
+        </SignalSection>
+      )}
 
       {/* ── 현재 포트폴리오 */}
       <div className="bg-slate-800 rounded-xl border border-slate-700">
