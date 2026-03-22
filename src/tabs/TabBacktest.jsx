@@ -255,6 +255,7 @@ export default function TabBacktest({ params, setParams, period, setPeriod, cust
           "3년": { totalRet: ret3y, annRet: ann3y, mdd: 0 },
           "5년": { totalRet: ret5y, annRet: ann5y, mdd: +mdd5.toFixed(1), wr: wr5y },
           updatedAt: new Date().toISOString(),
+          source: "TabBacktest",
         }).catch(() => {}); // config write 실패 시 무시
       } catch (e) {
         console.warn("KPI Firebase 저장 실패:", e);

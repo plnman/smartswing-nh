@@ -239,217 +239,41 @@ def build_udb_document(year: int, month: int, date_str: str) -> dict:
 # ─────────────────────────────────────────────
 #  Firebase 저장
 # ─────────────────────────────────────────────
-def save_to_firebase(db, doc_id: str, data: dict):
-    """Firebase /udb/{doc_id} 에 저장 (덮어쓰기)"""
-    doc_ref = db.collection("udb").document(doc_id)
-    doc_ref.set(data)
-    print(f"\n✅  Firebase /udb/{doc_id} 저장 완료")
+def save_to_firebase(db, doc_id: str, data: dict) -> bool:
+    """Firebase /udb/{doc_id} 에 저장 (덮어쓰기). 성공 True, 실패 False."""
+    try:
+        doc_ref = db.collection("udb").document(doc_id)
+        doc_ref.set(data)
+        print(f"\n✅  Firebase /udb/{doc_id} 저장 완료")
+        return True
+    except Exception as e:
+        print(f"\n❌  Firebase /udb/{doc_id} 저장 실패: {e}")
+        return False
 
 
 # ─────────────────────────────────────────────
-#  전략 KPI 계산 — ALL_MONTHLY + UDB 기반 (Python 포팅)
-#  GDB 고정 데이터에 UDB 신규 월을 더해 누적수익률·MDD 계산
+#  파이프라인 헬스 체크
+#  (Python vs JS KPI 수치 비교 제거 → 데이터 수집 품질 감시로 교체)
 # ─────────────────────────────────────────────
 
-GDB_LAST_DATE = "26-03"  # yy-mm
-
-# GDB 월별 KOSPI200 + 개별종목 평균 수익률 (backtest.js와 동기화, 21-02~26-03)
-# {r: KOSPI200, stock_r_avg: 200종목 평균} — gdb_stock_data.json 에서 계산
-def build_gdb_monthly_data() -> list:
-    """
-    gdb_stock_data.json을 읽어 월별 {r, stock_r_avg} 리스트 생성.
-    r = KOSPI200 월간 수익률 (GDB_MONTHLY_R 순서 동일)
-    stock_r_avg = 해당 월 200종목 평균 수익률
-    """
-    import pathlib, statistics
-
-    # KOSPI200 월간 수익률 (backtest.js ALL_MONTHLY 의 r값)
-    kospi_r_list = [
-        1.32,1.25,1.76,1.31,2.55,-3.4,-0.97,-4.4,-3.2,-3.92,5.61,
-        -9.19,0.99,1.12,-2.88,-0.15,-13.36,5.25,-0.11,-12.88,6.47,7.16,-9.33,
-        8.99,-0.78,2.3,1.38,3.87,-0.33,2.26,-3.15,-2.39,-6.48,10.75,5.79,
-        -6.08,5.75,5.36,-2.54,-1.89,7.21,-0.92,-4.98,-4.64,-1.58,-4.08,-2.35,
-        4.89,0.28,-0.57,1.91,6.16,15.29,5.79,-1.93,10.21,22.24,-4.39,9.38,
-        26.8,21.46,-7.6,
-    ]  # 62개 (21-02 ~ 26-03)
-
-    # 월 레이블 생성 (21-02 ~ 26-03)
-    months_labels = []
-    y, m = 2021, 2
-    while (y * 100 + m) <= (2026 * 100 + 3):
-        months_labels.append(f"{str(y)[2:]}-{m:02d}")
-        m += 1
-        if m > 12:
-            m = 1
-            y += 1
-
-    # gdb_stock_data.json 로드
-    json_path = pathlib.Path(__file__).parent / "gdb_stock_data.json"
-    if not json_path.exists():
-        # 파일 없으면 KOSPI200 r만 사용 (fallback)
-        print("  ⚠  gdb_stock_data.json 없음 — KOSPI200 r만 사용")
-        return [{"r": r, "stock_r_avg": r} for r in kospi_r_list]
-
-    with open(json_path, encoding="utf-8") as f:
-        gdb_data = json.load(f)
-
-    result = []
-    for i, ym in enumerate(months_labels):
-        kospi_r = kospi_r_list[i] if i < len(kospi_r_list) else 0.0
-        # 해당 월 200종목 수익률 수집
-        stock_rets = []
-        for code, vals in gdb_data.items():
-            r_val = vals.get("monthly", {}).get(ym)
-            if r_val is not None:
-                stock_rets.append(r_val)
-        stock_r_avg = round(statistics.mean(stock_rets), 2) if stock_rets else kospi_r
-        result.append({"date": ym, "r": kospi_r, "stock_r_avg": stock_r_avg})
-
-    return result
-
-
-GDB_MONTHLY_DATA = build_gdb_monthly_data()
-
-
-def load_all_monthly_from_firebase(db_client) -> list:
-    """
-    Firebase /udb 에서 GDB_LAST 이후 신규 월 데이터 로드.
-    반환: [{date, r, stock_r_avg}]
-      - r          : KOSPI200 월간 수익률
-      - stock_r_avg: 해당 월 200종목 평균 수익률 (UDB stocks 기준)
-    """
-    try:
-        docs = db_client.collection("udb").stream()
-        new_months = []
-        for d in docs:
-            data = d.to_dict()
-            if data.get("date", "") > GDB_LAST_DATE:
-                # 종목별 r 평균 계산
-                stocks = data.get("stocks", {})
-                stock_rets = [v.get("r", 0) for v in stocks.values() if v.get("r") is not None]
-                import statistics
-                stock_r_avg = round(statistics.mean(stock_rets), 2) if stock_rets else data.get("r", 0)
-                new_months.append({
-                    "date":         data["date"],
-                    "r":            data.get("r", 0),
-                    "stock_r_avg":  stock_r_avg,
-                })
-        new_months.sort(key=lambda x: x["date"])
-        return new_months
-    except Exception as e:
-        print(f"  ⚠  UDB 로드 실패: {e}")
-        return []
-
-
-def compute_strategy_kpi(monthly_data: list) -> dict:
-    """
-    GDB + UDB 월간 데이터로 전략 KPI 계산.
-    backtest.js runBacktestLive() Python 근사치.
-
-    monthly_data: [{"r": KOSPI200_r, "stock_r_avg": 개별종목_평균_r}, ...]
-      - r          : KOSPI200 월간 수익률 (신호 판단용)
-      - stock_r_avg: 해당 월 활성 종목들의 평균 수익률
-                     GDB 기간: gdb_stock_data.json에서 계산
-                     UDB 기간: UDB stocks[code].r 의 평균
-
-    신호 필터 (runBacktestLive와 동일):
-      - ADX 기본 파라미터: adx=30, zscore=2.0, mlThresh=65
-      - sigThreshBase = max(0.8, (adx-20)*0.15) = 1.5
-      - sigThresh     = sigThreshBase × max(0.6, zscore×0.35) = 1.5×0.7 = 1.05
-      - 해당 월 |KOSPI200_r| >= sigThresh 이면 신호 발생
-      - 신호 발생 시: 5슬롯 중 평균 약 3슬롯 참여 (seed 필터 적용 근사)
-
-    수익률 계산:
-      - 실제 개별 종목 수익률(stock_r_avg) 사용
-      - 참여율(holdDays/20 평균 ≈ 0.9) × 슬롯당 참여율
-    """
-    NSLOTS        = 5
-    PARTICIPATION = 0.85   # 평균 holdDays/20 (19일 보유 기준)
-    SLOT_RATE     = 3.0 / NSLOTS  # 신호 월 평균 3슬롯 참여
-    COST          = 0.31 / 2      # 편도 거래비용
-
-    # 신호 임계값 (기본 파라미터 기준)
-    ADX_DEFAULT  = 30
-    ZSCORE_DEFAULT = 2.0
-    sig_base  = max(0.8, (ADX_DEFAULT - 20) * 0.15)  # 1.5
-    sig_thresh = sig_base * max(0.6, ZSCORE_DEFAULT * 0.35)  # 1.05
-    hardstop  = -(3.5 + 0.3)
-    trail_cap = 4.0 * 7 + 5   # trailing 상한
-
-    def monthly_strategy_ret(kospi_r, stock_r_avg):
-        """신호 발생 시 해당 월 전략 수익률 (전체 포트폴리오 기준)"""
-        if abs(kospi_r) < sig_thresh:
-            return 0.0   # 신호 없음 → 거래 없음
-
-        # 실제 종목 수익률 기반
-        ret = stock_r_avg * PARTICIPATION
-        ret = max(ret, hardstop)
-        ret = min(ret, trail_cap)
-        ret -= COST
-        # 슬롯 참여율 반영 (전체 포트폴리오 대비)
-        return ret * SLOT_RATE
-
-    def calc_kpi(data_slice):
-        if len(data_slice) < 2:
-            return {"totalRet": 0, "annRet": 0, "mdd": 0}
-        v   = 100.0
-        pk  = 100.0
-        max_dd = 0.0
-        for row in data_slice:
-            sr = monthly_strategy_ret(row["r"], row.get("stock_r_avg", row["r"]))
-            v *= (1 + sr / 100)
-            if v > pk:
-                pk = v
-            dd = (v - pk) / pk * 100
-            if dd < max_dd:
-                max_dd = dd
-        n = len(data_slice)
-        total_ret = round((v / 100 - 1) * 100, 1)
-        ann_ret   = round((pow(v / 100, 12 / n) - 1) * 100, 1) if n >= 10 else total_ret
-        return {"totalRet": total_ret, "annRet": ann_ret, "mdd": round(max_dd, 1)}
-
-    total_n = len(monthly_data)
-    return {
-        "1년": calc_kpi(monthly_data[max(0, total_n - 12):]),
-        "3년": calc_kpi(monthly_data[max(0, total_n - 36):]),
-        "5년": calc_kpi(monthly_data[max(0, total_n - 60):]),
-    }
-
-
-def load_kpi_from_firebase(db_client):
-    """Firebase /config/kpi 현재값 로드. 없으면 None 반환."""
-    try:
-        snap = db_client.collection("config").document("kpi").get()
-        if snap.exists:
-            return snap.to_dict()
-        return None
-    except Exception as e:
-        print(f"  ⚠  /config/kpi 로드 실패: {e}")
-        return None
-
-
-def _send_kpi_alert(warn_lines: list):
-    """KPI 편차 초과 시 Telegram 알림 전송."""
-    bot   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-    chat  = os.environ.get("TELEGRAM_CHAT_ID",   "")
+def _send_pipeline_alert(warn_lines: list):
+    """파이프라인 이상 감지 시 Telegram 알림 전송."""
+    bot  = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat = os.environ.get("TELEGRAM_CHAT_ID",   "")
     if not bot or not chat:
-        print("  ℹ️  Telegram 환경변수 없음 — 알림 건너뜀")
+        print("  ℹ️  Telegram 환경변수 없음 — 파이프라인 알림 건너뜀")
         return
-    now = __import__("datetime").datetime.now(
-        __import__("datetime").timezone(__import__("datetime").timedelta(hours=9))
-    ).strftime("%Y-%m-%d %H:%M KST")
+    kst = datetime.timezone(datetime.timedelta(hours=9))
+    now = datetime.datetime.now(kst).strftime("%Y-%m-%d %H:%M KST")
     text = "\n".join([
-        "🚨 <b>SmartSwing KPI 불일치 경고</b>",
+        "🚨 <b>SmartSwing UDB 파이프라인 경고</b>",
         f"⏰ {now}",
         "",
-        "Python 근사치 vs Firebase(JS) 계산값이",
-        "허용 편차를 초과했습니다.",
+        "📊 감지된 이상 항목:",
+    ] + [f"  • {l}" for l in warn_lines] + [
         "",
-        "📊 초과 항목:",
-    ] + [f"  {l}" for l in warn_lines] + [
-        "",
-        "⚠️ 데이터 파이프라인 또는",
-        "파라미터 불일치 여부를 확인하세요.",
+        "⚠️ 데이터 수집 결과를 확인하세요.",
+        "(GitHub Actions 로그 → update-udb job)",
     ])
     try:
         r = requests.post(
@@ -458,85 +282,88 @@ def _send_kpi_alert(warn_lines: list):
             timeout=10,
         )
         r.raise_for_status()
-        print("  🚨  KPI 불일치 Telegram 알림 전송 완료")
+        print("  🚨  파이프라인 경고 Telegram 전송 완료")
     except Exception as e:
-        print(f"  ⚠  Telegram 알림 전송 실패: {e}")
+        print(f"  ⚠  Telegram 파이프라인 알림 전송 실패: {e}")
 
 
-def verify_kpi_consistency(py_kpi, js_kpi):
+def check_pipeline_health(doc_data: dict, firebase_ok: bool = True):
     """
-    Python 계산 KPI vs Firebase 저장 KPI (JS 계산) 수치 일치 검증.
+    UDB 문서 데이터 기반 파이프라인 이상 탐지.
+    문제가 있으면 Telegram 경고 알림 전송.
 
-    Python(compute_strategy_kpi)은 JS(runBacktestLive)의 근사치이므로
-    알고리즘 차이로 인한 어느 정도 편차는 허용합니다.
-    임계값 초과 시 경고 출력.
-
-    허용 편차 (근사치 알고리즘 차이 감안):
-      totalRet: ±20%p
-      annRet  : ±15%p
-      mdd     : ±5%p
+    감지 항목:
+      1. Firebase 저장 실패
+      2. 종가=0 종목 비율 > 20% (pykrx 수집 오류 과다)
+      3. KOSPI200 r=0 (지수 데이터 수집 실패)
+      4. ATR=0 종목 비율 > 30% (ATR 계산 실패 과다)
+      5. 수집 종목 수 < 예상치 (일부 종목 누락)
     """
-    THRESHOLDS = {
-        "totalRet": 20.0,
-        "annRet":   15.0,
-        "mdd":       5.0,
-    }
+    EXPECTED_STOCKS = len(STOCK_POOL)  # 200종목 예상
+    ZERO_CLOSE_WARN   = 0.20   # 20% 초과 → 경고
+    ZERO_ATR_WARN     = 0.30   # 30% 초과 → 경고
 
-    print("\n🔍  KPI 수치 일치 검증 (Python 계산 vs Firebase 저장값)")
+    print("\n🔍  파이프라인 헬스 체크")
     print("─" * 60)
 
-    if js_kpi is None:
-        print("  ℹ️  Firebase /config/kpi 없음 — JS 비교 건너뜀 (첫 실행?)")
-        print("─" * 60)
-        return
-
-    js_source  = js_kpi.get("source", "unknown")
-    js_updated = js_kpi.get("updatedAt", "N/A")
-    print(f"  Firebase 기존값: source={js_source}  updatedAt={js_updated}")
-
-    any_warn = False
     warn_lines = []
-    for period in ("1년", "3년", "5년"):
-        py = py_kpi.get(period, {})
-        js = js_kpi.get(period, {})
-        if not js:
-            print(f"  [{period}] Firebase에 해당 기간 없음 — 건너뜀")
-            continue
 
-        row_ok = True
-        details = []
-        for metric in ("totalRet", "annRet", "mdd"):
-            py_v = py.get(metric, 0)
-            js_v = js.get(metric, 0)
-            diff = abs(py_v - js_v)
-            thr  = THRESHOLDS[metric]
-            flag = "⚠ DIFF" if diff > thr else "OK"
-            if diff > thr:
-                row_ok = False
-                any_warn = True
-                warn_lines.append(f"[{period}] {metric}: py={py_v:+.1f}% js={js_v:+.1f}% Δ={diff:.1f}%p")
-            details.append(f"{metric}: py={py_v:+.1f}% js={js_v:+.1f}% Δ={diff:.1f}%p [{flag}]")
+    # 1. Firebase 저장 실패
+    if not firebase_ok:
+        warn_lines.append("Firebase /udb 저장 실패 — 데이터가 업데이트되지 않았습니다")
 
-        status = "✅" if row_ok else "❌"
-        print(f"\n  {status}  [{period}]")
-        for d in details:
-            print(f"       {d}")
+    # 2. 수집 종목 수 체크
+    stocks = doc_data.get("stocks", {})
+    actual_count = len(stocks)
+    if actual_count < EXPECTED_STOCKS:
+        missing = EXPECTED_STOCKS - actual_count
+        warn_lines.append(
+            f"수집 종목 수 부족: {actual_count}/{EXPECTED_STOCKS} ({missing}종목 누락)"
+        )
+        print(f"  ⚠  수집 종목 수: {actual_count}/{EXPECTED_STOCKS} ({missing}종목 누락)")
+    else:
+        print(f"  ✅  수집 종목 수: {actual_count}종목")
+
+    # 3. 종가=0 종목 비율
+    if stocks:
+        zero_close = [c for c, v in stocks.items() if v.get("close", 0) == 0]
+        zero_ratio = len(zero_close) / actual_count
+        if zero_ratio > ZERO_CLOSE_WARN:
+            warn_lines.append(
+                f"종가=0 종목 과다: {len(zero_close)}종목 ({zero_ratio*100:.0f}%) "
+                f"— pykrx 수집 오류 의심"
+            )
+            print(f"  ⚠  종가=0: {len(zero_close)}종목 ({zero_ratio*100:.0f}%) — 임계값 초과")
+        else:
+            print(f"  ✅  종가=0: {len(zero_close)}종목 ({zero_ratio*100:.0f}%) — 정상")
+
+        # 4. ATR=0 종목 비율
+        zero_atr = [c for c, v in stocks.items() if v.get("atr_pct", 0) == 0]
+        atr_ratio = len(zero_atr) / actual_count
+        if atr_ratio > ZERO_ATR_WARN:
+            warn_lines.append(
+                f"ATR=0 종목 과다: {len(zero_atr)}종목 ({atr_ratio*100:.0f}%) "
+                f"— ATR 계산 실패 의심"
+            )
+            print(f"  ⚠  ATR=0: {len(zero_atr)}종목 ({atr_ratio*100:.0f}%) — 임계값 초과")
+        else:
+            print(f"  ✅  ATR=0: {len(zero_atr)}종목 ({atr_ratio*100:.0f}%) — 정상")
+
+    # 5. KOSPI200 수익률 체크
+    kospi_r = doc_data.get("r", None)
+    if kospi_r == 0 or kospi_r is None:
+        warn_lines.append("KOSPI200 월간 수익률=0 — 지수 데이터 수집 실패 가능성")
+        print(f"  ⚠  KOSPI200 r={kospi_r} — 수집 실패 가능성")
+    else:
+        print(f"  ✅  KOSPI200 r={kospi_r:+.2f}%")
 
     print("─" * 60)
-    if any_warn:
-        print("  ❌  경고: 임계값 초과 편차 감지! 데이터 이상 여부 확인 필요.")
-        _send_kpi_alert(warn_lines)
+    if warn_lines:
+        print(f"  ❌  경고 {len(warn_lines)}건 감지 — Telegram 알림 전송")
+        _send_pipeline_alert(warn_lines)
     else:
-        print("  ✅  모든 기간 허용 편차 이내 — 정상")
+        print("  ✅  파이프라인 정상 — 이상 없음")
     print()
-
-
-def save_kpi_to_firebase(db_client, kpi: dict):
-    """Firebase /config/kpi 에 전략 KPI 저장"""
-    kpi["updatedAt"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    kpi["source"] = "update_udb.py"
-    db_client.collection("config").document("kpi").set(kpi)
-    print(f"\n✅  Firebase /config/kpi 저장: 5년 누적 {kpi['5년']['totalRet']}%  연환산 {kpi['5년']['annRet']}%")
 
 
 # ─────────────────────────────────────────────
@@ -569,25 +396,15 @@ def main():
     # Firebase 저장
     print("\n🔥  Firebase 연결 중...")
     db = init_firebase()
-    save_to_firebase(db, doc_data["date"], doc_data)
+    firebase_ok = save_to_firebase(db, doc_data["date"], doc_data)
 
-    # ── 전략 KPI 재계산 → /config/kpi 저장 ──
-    print("\n📊  전략 KPI 재계산 중...")
-    udb_new = load_all_monthly_from_firebase(db)
-    monthly_data = list(GDB_MONTHLY_DATA) + udb_new
-    kpi = compute_strategy_kpi(monthly_data)
-
-    # ── KPI 수치 일치 검증 (Python 계산 vs Firebase 기존 JS 계산) ──
-    existing_kpi = load_kpi_from_firebase(db)
-    verify_kpi_consistency(kpi, existing_kpi)
-
-    save_kpi_to_firebase(db, kpi)
+    # ── 파이프라인 헬스 체크 ──
+    check_pipeline_health(doc_data, firebase_ok=firebase_ok)
 
     print("\n🎉  UDB 업데이트 완료!")
     print(f"     문서 경로: /udb/{doc_data['date']}")
     print(f"     종목 수: {len(doc_data['stocks'])}개")
     print(f"     KOSPI200: {doc_data['r']:+.2f}%")
-    print(f"     전략 KPI (5년): {kpi['5년']['totalRet']}%  연환산 {kpi['5년']['annRet']}%")
 
 if __name__ == "__main__":
     main()

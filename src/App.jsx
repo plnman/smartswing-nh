@@ -81,9 +81,13 @@ export default function App() {
             <span className="text-slate-700">|</span>
             <span className="text-xs font-mono text-slate-500">GDB 동결 2026-03-21</span>
           </div>
-          <div className="flex items-center gap-1.5">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"/>
-            <span className="text-xs text-slate-400">Simulation Mode</span>
+          <div className="flex items-center gap-2">
+            <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full
+              bg-emerald-900/40 border border-emerald-700/50 text-emerald-300 text-[11px]">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"/>
+              T-0 실시간
+            </span>
+            <span className="text-[10px] text-slate-600">15:00 KST 자동 실행</span>
           </div>
         </div>
       </header>

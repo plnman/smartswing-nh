@@ -22,6 +22,23 @@ const GH_OWNER = "plnman";
 const GH_REPO  = "smartswing-nh";
 const GH_WF    = "daily_alert.yml";
 
+// ── 백테스팅/시뮬레이션 샘플 종목 풀 (telegram_alert.py STOCK_POOL 동일)
+// 실제 신호와 무관하게 "어떤 종목을 감시하는지" 안내용으로만 표시
+const SAMPLE_POOL = [
+  { name: "삼성전자",         code: "005930", slot: 1 },
+  { name: "SK하이닉스",       code: "000660", slot: 1 },
+  { name: "LG에너지솔루션",   code: "373220", slot: 2 },
+  { name: "삼성SDI",          code: "006400", slot: 2 },
+  { name: "현대차",           code: "005380", slot: 3 },
+  { name: "기아",             code: "000270", slot: 3 },
+  { name: "POSCO홀딩스",      code: "005490", slot: 4 },
+  { name: "NAVER",            code: "035420", slot: 4 },
+  { name: "카카오",           code: "035720", slot: 5 },
+  { name: "삼성바이오로직스", code: "207940", slot: 5 },
+  { name: "KB금융",           code: "105560", slot: 1 },
+  { name: "신한지주",         code: "055550", slot: 2 },
+];
+
 // ── KST 기준 오늘 날짜
 function getKSTDateKey() {
   const kst = new Date(Date.now() + 9 * 3600_000);
@@ -475,6 +492,51 @@ export default function TabLiveSim() {
           </div>
         </div>
       )}
+
+      {/* ── 시뮬레이션 샘플 종목 풀 (표시 전용 · 액션 버튼 없음) */}
+      <div className="bg-slate-800/40 rounded-xl border border-slate-700/40">
+        <div className="flex items-center gap-2 p-3 border-b border-slate-700/40">
+          <span className="text-xs font-bold text-slate-400">🔍 모니터링 종목 풀</span>
+          <span className="text-[10px] bg-slate-700 text-slate-500 px-2 py-0.5 rounded-full">
+            {SAMPLE_POOL.length}종목
+          </span>
+          <span className="ml-auto text-[10px] text-slate-600">
+            백테스팅 샘플 · 신호 발생 시 위 섹션에만 액션 버튼 표시
+          </span>
+        </div>
+        <div className="p-3 flex flex-wrap gap-1.5">
+          {SAMPLE_POOL.map(s => {
+            const hasBuySignal  = signals.some(x => x.code === s.code);
+            const hasExitSignal = exits.some(x => x.code === s.code);
+            const isHeld        = !!holdings[s.code];
+            return (
+              <span
+                key={s.code}
+                className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] border ${
+                  hasBuySignal
+                    ? "bg-emerald-900/30 border-emerald-700/50 text-emerald-400"
+                    : hasExitSignal
+                    ? "bg-red-900/30 border-red-700/50 text-red-400"
+                    : isHeld
+                    ? "bg-indigo-900/30 border-indigo-700/50 text-indigo-400"
+                    : "bg-slate-700/40 border-slate-600/40 text-slate-500"
+                }`}
+              >
+                <span className="font-medium">{s.name}</span>
+                <span className="text-[9px] opacity-60">S{s.slot}</span>
+                {hasBuySignal  && <span className="text-[9px] font-bold text-emerald-300">▲매수</span>}
+                {hasExitSignal && <span className="text-[9px] font-bold text-red-300">▼청산</span>}
+                {isHeld && !hasBuySignal && !hasExitSignal && (
+                  <span className="text-[9px] font-bold text-indigo-300">●보유</span>
+                )}
+              </span>
+            );
+          })}
+        </div>
+        <div className="px-3 pb-2 text-[10px] text-slate-600">
+          ▲매수 = 오늘 매수 신호 발생 &nbsp;·&nbsp; ▼청산 = RSI-2 ≥ 99 청산 신호 &nbsp;·&nbsp; ●보유 = 현재 포트폴리오 보유 중
+        </div>
+      </div>
 
       {/* ── 매수 등록 모달 */}
       {addModal && (
