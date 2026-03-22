@@ -182,6 +182,7 @@ def get_real_signals(today: datetime.datetime):
     signals = []
     exits   = []
     skipped = []
+    prices  = {}   # {code: T-1 종가} — 전 종목 저장, 매도 모달 자동입력용
 
     for name, code, slot in STOCK_POOL:
         df = fetch_ohlcv(code, t1_str, n_days=30)
@@ -193,6 +194,8 @@ def get_real_signals(today: datetime.datetime):
         close_t1 = float(df["종가"].iloc[-1])
         rsi2     = calc_rsi2(df["종가"])
         adx      = calc_adx(df)
+
+        prices[code] = close_t1   # 전 종목 T-1 종가 기록
 
         print(f"  {name}({code}): 종가={close_t1:,.0f}  RSI-2={rsi2}  ADX={adx}")
 
@@ -213,7 +216,7 @@ def get_real_signals(today: datetime.datetime):
     if skipped:
         print(f"  ⚠ 데이터 없음: {', '.join(skipped)}")
 
-    return signals, exits, t1_str
+    return signals, exits, t1_str, prices
 
 # ─────────────────────────────────────────────
 #  메시지 빌드
@@ -275,10 +278,11 @@ def build_message(today, signals, exits, t1_str, kpi_data=None):
 # ─────────────────────────────────────────────
 #  Firebase /daily/{YYYYMMDD} 저장
 # ─────────────────────────────────────────────
-def save_to_firebase(today_str: str, signals: list, exits: list, t1_str: str):
+def save_to_firebase(today_str: str, signals: list, exits: list, t1_str: str, prices: dict = None):
     """
     Firebase Firestore /daily/{YYYYMMDD} 에 오늘 신호 저장.
     TabLiveSim 탭에서 실시간 신호를 읽어 보여주는 데 사용.
+    prices: {code: T-1 종가} — 매도 모달 자동입력용
     FIREBASE_CREDENTIALS 없으면 조용히 건너뜀.
     """
     cred_json = os.environ.get("FIREBASE_CREDENTIALS")
@@ -297,13 +301,16 @@ def save_to_firebase(today_str: str, signals: list, exits: list, t1_str: str):
         db = fb_fs.client()
 
         # exits 리스트의 'exit' 키 이름 충돌 방지 (Python 예약어 아님, 안전)
-        db.collection("daily").document(today_str).set({
+        doc = {
             "signals":  signals,
             "exits":    exits,
             "t1_date":  t1_str,
             "run_at":   datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "date":     f"{today_str[:4]}-{today_str[4:6]}-{today_str[6:]}",
-        })
+        }
+        if prices:
+            doc["prices"] = prices   # {code: T-1 종가}
+        db.collection("daily").document(today_str).set(doc)
         print(f"  ✅ Firebase /daily/{today_str} 저장 완료")
 
     except Exception as e:
@@ -392,7 +399,7 @@ def main():
     kpi_data = load_kpi_from_firebase()
 
     print("📡 pykrx 실시간 데이터 수집 중...")
-    signals, exits, t1_str = get_real_signals(today)
+    signals, exits, t1_str, prices = get_real_signals(today)
 
     msg = build_message(today, signals, exits, t1_str, kpi_data)
     print("─── 전송 메시지 ───")
@@ -407,7 +414,7 @@ def main():
 
     # Firebase /daily/{YYYYMMDD} 저장 (TabLiveSim 탭에서 읽음)
     today_str = today.strftime("%Y%m%d")
-    save_to_firebase(today_str, signals, exits, t1_str)
+    save_to_firebase(today_str, signals, exits, t1_str, prices)
 
     # PAT 만료 30일 전부터 매일 경고
     check_pat_expiry_alert(today)

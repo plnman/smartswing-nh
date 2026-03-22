@@ -155,12 +155,16 @@ export default function TabLiveSim() {
     setAddForm({ entry_price: "", qty: "" });
   };
 
-  // ── 매도 완료 버튼 → 모달 열기
+  // ── 매도 완료 버튼 → 모달 열기 (T-1 종가 자동입력)
   const handleSellClick = (code) => {
     const h = holdings[code];
     if (!h) return;
-    setSellModal({ ...h, code });
-    setSellForm({ sell_price: "", sell_date: todayDisp });
+    const t1Price = daily?.prices?.[code];   // telegram_alert.py가 저장한 T-1 종가
+    setSellModal({ ...h, code, t1Price });
+    setSellForm({
+      sell_price: t1Price ? String(Math.round(t1Price)) : "",
+      sell_date:  todayDisp,
+    });
   };
 
   // ── 매도 확정 → /trades 저장 + holding 삭제
@@ -590,7 +594,19 @@ export default function TabLiveSim() {
 
               <div className="space-y-3">
                 <div>
-                  <label className="text-xs text-slate-400 mb-1 block">실제 매도가 (원)</label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-xs text-slate-400">실제 매도가 (원)</label>
+                    {sellModal.t1Price ? (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded
+                        bg-sky-900/50 text-sky-400 border border-sky-700/40">
+                        T-1 종가 자동입력 · 수정 가능
+                      </span>
+                    ) : (
+                      <span className="text-[10px] text-slate-600">
+                        오늘 신호 없음 — 직접 입력
+                      </span>
+                    )}
+                  </div>
                   <input
                     type="number"
                     value={sellForm.sell_price}
