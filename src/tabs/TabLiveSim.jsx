@@ -22,22 +22,6 @@ const GH_OWNER = "plnman";
 const GH_REPO  = "smartswing-nh";
 const GH_WF    = "daily_alert.yml";
 
-// ── 백테스팅/시뮬레이션 샘플 종목 풀 (telegram_alert.py STOCK_POOL 동일)
-// 실제 신호와 무관하게 "어떤 종목을 감시하는지" 안내용으로만 표시
-const SAMPLE_POOL = [
-  { name: "삼성전자",         code: "005930", slot: 1 },
-  { name: "SK하이닉스",       code: "000660", slot: 1 },
-  { name: "LG에너지솔루션",   code: "373220", slot: 2 },
-  { name: "삼성SDI",          code: "006400", slot: 2 },
-  { name: "현대차",           code: "005380", slot: 3 },
-  { name: "기아",             code: "000270", slot: 3 },
-  { name: "POSCO홀딩스",      code: "005490", slot: 4 },
-  { name: "NAVER",            code: "035420", slot: 4 },
-  { name: "카카오",           code: "035720", slot: 5 },
-  { name: "삼성바이오로직스", code: "207940", slot: 5 },
-  { name: "KB금융",           code: "105560", slot: 1 },
-  { name: "신한지주",         code: "055550", slot: 2 },
-];
 
 // ── KST 기준 오늘 날짜
 function getKSTDateKey() {
@@ -295,6 +279,64 @@ export default function TabLiveSim() {
         </div>
       )}
 
+      {/* ── UI 샘플 안내 (하드코딩 · 클릭 불가) */}
+      <div className="rounded-xl border border-dashed border-slate-600/60 overflow-hidden">
+        <div className="flex items-center gap-2 px-4 py-2 bg-slate-800/50 border-b border-dashed border-slate-600/60">
+          <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">📋 UI 샘플 — 실제 신호 발생 시 아래와 같이 표시됩니다</span>
+        </div>
+
+        {/* 샘플 1: 매수 신호 + 버튼 */}
+        <div className="p-4 space-y-2 opacity-50 pointer-events-none bg-slate-800/30">
+          <div className="flex items-center gap-3">
+            <span className="px-2 py-0.5 rounded text-[9px] font-bold bg-slate-700 text-slate-400 border border-slate-600 shrink-0">샘플</span>
+            <span className="px-2.5 py-1 rounded-lg text-xs font-bold
+              bg-emerald-900/60 text-emerald-300 border border-emerald-700/50 shrink-0">
+              ▲ 매수
+            </span>
+            <div className="flex-1 min-w-0">
+              <span className="font-bold text-slate-200">NAVER</span>
+              <span className="text-xs text-slate-500 ml-2">035420 · 슬롯4</span>
+            </div>
+            <div className="text-right shrink-0">
+              <div className="text-xs text-slate-300">₩221,500 × 45주</div>
+              <div className="text-[10px] text-slate-500">= ₩9,967,500</div>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="px-2 py-0.5 rounded bg-slate-700 text-emerald-400 font-mono text-[11px]">RSI-2 = 14.29 ≤ 15 ✓</span>
+            <span className="px-2 py-0.5 rounded bg-slate-700 text-sky-400 font-mono text-[11px]">ADX = 35.4 ≥ 30 ✓</span>
+            <button className="ml-auto px-3 py-1 text-xs font-semibold rounded-lg
+              bg-emerald-800 text-emerald-200">
+              + 매수 등록
+            </button>
+          </div>
+        </div>
+
+        {/* 샘플 2: 매수 후 보유 중 */}
+        <div className="p-4 space-y-2 opacity-50 pointer-events-none bg-slate-800/30 border-t border-dashed border-slate-600/40">
+          <div className="flex items-center gap-3">
+            <span className="px-2 py-0.5 rounded text-[9px] font-bold bg-slate-700 text-slate-400 border border-slate-600 shrink-0">샘플</span>
+            <span className="px-2.5 py-1 rounded-lg text-xs font-bold
+              bg-emerald-900/60 text-emerald-300 border border-emerald-700/50 shrink-0">
+              ▲ 매수
+            </span>
+            <div className="flex-1 min-w-0">
+              <span className="font-bold text-slate-200">NAVER</span>
+              <span className="text-xs text-slate-500 ml-2">035420 · 슬롯4</span>
+            </div>
+            <div className="text-right shrink-0">
+              <div className="text-xs text-slate-300">₩221,500 × 45주</div>
+              <div className="text-[10px] text-slate-500">= ₩9,967,500</div>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="px-2 py-0.5 rounded bg-slate-700 text-emerald-400 font-mono text-[11px]">RSI-2 = 14.29 ≤ 15 ✓</span>
+            <span className="px-2 py-0.5 rounded bg-slate-700 text-sky-400 font-mono text-[11px]">ADX = 35.4 ≥ 30 ✓</span>
+            <span className="ml-auto text-xs text-yellow-400 font-semibold">🟡 보유 중</span>
+          </div>
+        </div>
+      </div>
+
       {/* ── 매수 신호 */}
       <SignalSection
         title="▲ 오늘 매수 신호"
@@ -493,50 +535,6 @@ export default function TabLiveSim() {
         </div>
       )}
 
-      {/* ── 시뮬레이션 샘플 종목 풀 (표시 전용 · 액션 버튼 없음) */}
-      <div className="bg-slate-800/40 rounded-xl border border-slate-700/40">
-        <div className="flex items-center gap-2 p-3 border-b border-slate-700/40">
-          <span className="text-xs font-bold text-slate-400">🔍 모니터링 종목 풀</span>
-          <span className="text-[10px] bg-slate-700 text-slate-500 px-2 py-0.5 rounded-full">
-            {SAMPLE_POOL.length}종목
-          </span>
-          <span className="ml-auto text-[10px] text-slate-600">
-            백테스팅 샘플 · 신호 발생 시 위 섹션에만 액션 버튼 표시
-          </span>
-        </div>
-        <div className="p-3 flex flex-wrap gap-1.5">
-          {SAMPLE_POOL.map(s => {
-            const hasBuySignal  = signals.some(x => x.code === s.code);
-            const hasExitSignal = exits.some(x => x.code === s.code);
-            const isHeld        = !!holdings[s.code];
-            return (
-              <span
-                key={s.code}
-                className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] border ${
-                  hasBuySignal
-                    ? "bg-emerald-900/30 border-emerald-700/50 text-emerald-400"
-                    : hasExitSignal
-                    ? "bg-red-900/30 border-red-700/50 text-red-400"
-                    : isHeld
-                    ? "bg-indigo-900/30 border-indigo-700/50 text-indigo-400"
-                    : "bg-slate-700/40 border-slate-600/40 text-slate-500"
-                }`}
-              >
-                <span className="font-medium">{s.name}</span>
-                <span className="text-[9px] opacity-60">S{s.slot}</span>
-                {hasBuySignal  && <span className="text-[9px] font-bold text-emerald-300">▲매수</span>}
-                {hasExitSignal && <span className="text-[9px] font-bold text-red-300">▼청산</span>}
-                {isHeld && !hasBuySignal && !hasExitSignal && (
-                  <span className="text-[9px] font-bold text-indigo-300">●보유</span>
-                )}
-              </span>
-            );
-          })}
-        </div>
-        <div className="px-3 pb-2 text-[10px] text-slate-600">
-          ▲매수 = 오늘 매수 신호 발생 &nbsp;·&nbsp; ▼청산 = RSI-2 ≥ 99 청산 신호 &nbsp;·&nbsp; ●보유 = 현재 포트폴리오 보유 중
-        </div>
-      </div>
 
       {/* ── 매수 등록 모달 */}
       {addModal && (
