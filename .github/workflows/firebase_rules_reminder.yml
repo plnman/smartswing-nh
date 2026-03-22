@@ -1,49 +1,40 @@
-# ══════════════════════════════════════════════════════════════
-#  Firebase 보안 규칙 만료 알림
-#  - 2026-12-01 (만료 30일 전) 텔레그램 알림 발송
-#  - 2026-12-15 (만료 16일 전) 재알림
-#  - 2026-12-25 (만료 6일 전)  최종 알림
-# ══════════════════════════════════════════════════════════════
 name: Firebase Rules Expiry Reminder
 
 on:
   schedule:
-    - cron: "0 9 1 12 *"   # 12월 1일 오전 9시 KST (UTC 00:00)
-    - cron: "0 9 15 12 *"  # 12월 15일 오전 9시 KST
-    - cron: "0 9 25 12 *"  # 12월 25일 오전 9시 KST
-  workflow_dispatch:        # 수동 테스트용
+    - cron: "0 0 1 12 *"   # 12월 1일 KST 09:00 (UTC 00:00)
+    - cron: "0 0 15 12 *"  # 12월 15일
+    - cron: "0 0 25 12 *"  # 12월 25일
+  workflow_dispatch:
 
 jobs:
   notify:
-    name: "🔔 Firebase 규칙 만료 알림"
     runs-on: ubuntu-latest
     steps:
-      - name: 만료 D-Day 계산
-        id: dday
-        run: |
-          EXPIRE="2026-12-31"
-          TODAY=$(date +%Y-%m-%d)
-          DAYS=$(( ( $(date -d "$EXPIRE" +%s) - $(date -d "$TODAY" +%s) ) / 86400 ))
-          echo "days=$DAYS" >> $GITHUB_OUTPUT
-          echo "today=$TODAY" >> $GITHUB_OUTPUT
-
-      - name: 텔레그램 알림 발송
+      - name: Send Telegram reminder
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
-          DAYS_LEFT: ${{ steps.dday.outputs.days }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          MESSAGE="🔥 <b>Firebase 보안 규칙 만료 임박!</b>
-
-📅 만료일: <b>2026-12-31</b>
-⏳ 남은 기간: <b>${DAYS_LEFT}일</b>
-
-Firebase Console에서 보안 규칙을 갱신해 주세요.
-https://console.firebase.google.com/project/smartswing-nh/firestore/databases/-default-/security/rules
-
-규칙 예시:
-<code>allow read, write: if request.time &lt; timestamp.date(2027, 12, 31);</code>"
-
-          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-            -H "Content-Type: application/json" \
-            -d "{\"chat_id\": \"${CHAT_ID}\", \"text\": \"${MESSAGE}\", \"parse_mode\": \"HTML\"}"
+          python3 - <<'PYEOF'
+          import os, requests, datetime
+          token = os.environ["BOT_TOKEN"]
+          chat_id = os.environ["CHAT_ID"]
+          expire = datetime.date(2026, 12, 31)
+          today = datetime.date.today()
+          days_left = (expire - today).days
+          msg = (
+              "\U0001f525 <b>Firebase 보안 규칙 만료 임박!</b>\n\n"
+              f"\U0001f4c5 만료일: <b>2026-12-31</b>\n"
+              f"\u23f3 남은 기간: <b>{days_left}일</b>\n\n"
+              "Firebase Console에서 규칙을 갱신해 주세요.\n"
+              "https://console.firebase.google.com/project/smartswing-nh/firestore/databases/-default-/security/rules\n\n"
+              "<code>allow read, write: if request.time &lt; timestamp.date(2027, 12, 31);</code>"
+          )
+          r = requests.post(
+              f"https://api.telegram.org/bot{token}/sendMessage",
+              json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"},
+              timeout=15
+          )
+          print(r.status_code, r.text)
+          PYEOF
