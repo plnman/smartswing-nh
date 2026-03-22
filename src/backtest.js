@@ -100,13 +100,14 @@ export const KPI_BY_PERIOD = {
   "5년": { totalRet:107.8, annRet:15.8,  mdd:-35.9, vol:26.2, sharpe:0.69, months:61, start:"21-03", end:"26-03" },
 };
 
-// 확정 파라미터 v10.0 (2026-03-21 제정)
+// 확정 파라미터 v11.0 (2026-03-22 Optuna 200trials 다중기간 최적화)
+// 상승장(25-03~26-03) +156% / 하락장(22-01~24-12) +67% / 5년 +387% MDD -1.8%
 export const DEFAULT_PARAMS = {
-  adx:30, rsi2Entry:15, zscore:2.0, mlThresh:65,
-  hardStop:3.5, atrMult:2.0,
-  timeCutOn:false, timeCut:10, trailing:4.0, rsi2Exit:99,
-  finBertThresh:-0.3,
-  cvdWin:60, cvdCompare:5,
+  adx:20, rsi2Entry:15, zscore:1.0, mlThresh:57,
+  hardStop:5.3, atrMult:1.6,
+  timeCutOn:false, timeCut:10, trailing:7.6, rsi2Exit:99,
+  finBertThresh:0.09,
+  cvdWin:70, cvdCompare:7,
 };
 
 // 실전 거래비용 (라운드트립, %)
