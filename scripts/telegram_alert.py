@@ -130,7 +130,7 @@ def is_trading_day(dt):
 # ─────────────────────────────────────────────
 #  pykrx 유틸
 # ─────────────────────────────────────────────
-def fetch_ohlcv(code: str, end_date: str, n_days: int = 30) -> pd.DataFrame:
+def fetch_ohlcv(code: str, end_date: str, n_days: int = 60) -> pd.DataFrame:
     """
     end_date 기준 최근 n_days 거래일 OHLCV.
     end_date: "YYYYMMDD"
@@ -216,12 +216,12 @@ def get_real_signals(today: datetime.datetime):
 
     for name, code, slot in STOCK_POOL:
         # T-0 먼저 시도
-        df = fetch_ohlcv(code, today_str, n_days=30)
+        df = fetch_ohlcv(code, today_str, n_days=60)
         is_fallback = False
 
         if df.empty or len(df) < 5:
             # 당일 데이터 미수신 → T-1 fallback
-            df = fetch_ohlcv(code, t1_str, n_days=30)
+            df = fetch_ohlcv(code, t1_str, n_days=60)
             is_fallback = True
             fallback_codes.append(f"{name}({code})")
 

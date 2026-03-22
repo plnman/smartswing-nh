@@ -125,7 +125,9 @@ export default function TabStrategy({ params, setParams, setTab, period, validat
         <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">자금 관리</p>
         <div className="grid grid-cols-2 gap-6">
           <ParamSlider label="종목당 투자금 (만원)" val={1000} min={500} max={3000} step={100} unit="만" note="고정 슬롯 — ATR 동적 사이징 미사용" setParams={ps}/>
-          <ParamSlider label="최대 동시 보유 종목" val={5} min={1} max={10} step={1} unit="종목" note="총 최대 투자금 = 1,000만 × 5 = 5,000만원" setParams={ps}/>
+          <ParamSlider label="최대 동시 보유 종목" val={params.nSlots} min={1} max={10} step={1} unit="종목"
+            note={`총 최대 투자금 = 1,000만 × ${params.nSlots} = ${(params.nSlots * 1000).toLocaleString()}만원`}
+            pk="nSlots" setParams={ps}/>
         </div>
         <div className="mt-2 p-2 bg-indigo-900/20 rounded-lg border border-indigo-800/40 text-[10px] text-indigo-300">
           <span className="font-bold">규칙 5 [v10]</span> 동일 GICS 섹터 최대 2종목 동시 보유
@@ -292,6 +294,46 @@ export default function TabStrategy({ params, setParams, setTab, period, validat
               ⚠ Time-Cut OFF
             </span>
           )}
+        </div>
+      </div>
+
+      {/* ── 실제 사용 지표 전체 목록 (설정 탭에 없는 지표 포함) */}
+      <div className="bg-slate-800/60 rounded-xl p-4 border border-slate-700/50">
+        <div className="flex items-center gap-2 mb-3">
+          <span className="text-sm">📐</span>
+          <p className="text-xs font-bold text-slate-300 uppercase tracking-wider">실제 사용 지표 전체 목록</p>
+          <span className="ml-auto text-[10px] text-slate-600">telegram_alert.py · 매일 15:00 KST 계산</span>
+        </div>
+        <div className="grid grid-cols-2 gap-2 text-[11px]">
+          {[
+            { name:"RSI-2", calc:"최근 2일 Gain/Loss 평균", setting:"rsi2Entry ≤ 15 진입  rsi2Exit ≥ 99 청산", active:true },
+            { name:"ADX(14)", calc:"EWM 14일 — 60 거래일 데이터 기반", setting:`adxMin ≥ ${params.adx} (L2 설정)`, active:true },
+            { name:"ATR(14)", calc:"True Range EWM 14일", setting:"hardStop 손절 기준 (atrMult × ATR)", active:true },
+            { name:"SMA20 이격도", calc:"종가 / 20일 이동평균", setting:"≥ 97% 기준 — 현재 UI 표시 전용, 신호에 미반영", active:false },
+            { name:"FinBERT 감성", calc:"직전월 KOSPI 수익률 proxy", setting:`임계값 ${params.finBertThresh} — KIS API 연동 전 미작동`, active:false },
+            { name:"Vol Z-Score", calc:"거래량 표준화 점수", setting:`zscore ≥ ${params.zscore} (L3 proxy 시뮬 반영)`, active:true },
+            { name:"CVD 창(Window)", calc:"매수/매도 압력 누적 비교", setting:`${params.cvdWin}일 롤링 · compare=${params.cvdCompare}`, active:true },
+            { name:"XGBoost ML", calc:"월별 시뮬 seed 기반 proxy", setting:`mlThresh ≥ ${params.mlThresh}% 승인`, active:true },
+            { name:"Trailing Stop", calc:"고점 대비 하락폭 추적", setting:`${params.trailing}% 하락 시 청산`, active:true },
+            { name:"Time-Cut", calc:"보유 거래일 카운터", setting:params.timeCutOn ? `${params.timeCut}거래일 초과 시 강제 청산` : "현재 OFF", active:params.timeCutOn },
+          ].map(ind => (
+            <div key={ind.name} className={`flex gap-2 p-2 rounded-lg border ${
+              ind.active
+                ? "bg-slate-700/40 border-slate-600/50"
+                : "bg-slate-800/40 border-slate-700/30 opacity-60"
+            }`}>
+              <div className="shrink-0 mt-0.5">
+                <span className={`inline-block w-1.5 h-1.5 rounded-full ${ind.active ? "bg-emerald-400" : "bg-slate-600"}`}/>
+              </div>
+              <div className="min-w-0">
+                <div className="font-bold text-slate-200">{ind.name}
+                  {!ind.active && <span className="ml-1 text-[9px] text-amber-500 font-normal">미작동</span>}
+                </div>
+                <div className="text-[10px] text-slate-500 mt-0.5">{ind.calc}</div>
+                <div className="text-[10px] text-indigo-400 mt-0.5">{ind.setting}</div>
+              </div>
+            </div>
+          ))}
         </div>
       </div>
 

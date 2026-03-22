@@ -103,7 +103,7 @@ export const KPI_BY_PERIOD = {
 // 확정 파라미터 v11.0 (2026-03-22 Optuna 200trials 다중기간 최적화)
 // 상승장(25-03~26-03) +156% / 하락장(22-01~24-12) +67% / 5년 +387% MDD -1.8%
 export const DEFAULT_PARAMS = {
-  adx:20, rsi2Entry:15, zscore:1.0, mlThresh:57,
+  adx:20, rsi2Entry:15, zscore:1.0, mlThresh:57, nSlots:5,
   hardStop:5.3, atrMult:1.6,
   timeCutOn:false, timeCut:10, trailing:7.6, rsi2Exit:99,
   finBertThresh:0.09,
@@ -196,7 +196,7 @@ export function runBacktest(period, params, customRange = null) {
   const sigThresh = sigThreshBase * Math.max(0.6, params.zscore * 0.35);
   const mlPassMax = 100 - (params.mlThresh - 55);
 
-  const NSLOTS = 5;
+  const NSLOTS = params?.nSlots ?? 5;
   const tradeLog = [];
   let id = 1;
   monthly.forEach((m, i) => {
@@ -479,7 +479,7 @@ export function runBacktestLive(period, params, customRange = null, liveData = n
   const sigThresh = sigThreshBase * Math.max(0.6, params.zscore * 0.35);
   const mlPassMax = 100 - (params.mlThresh - 55);
 
-  const NSLOTS = 5;
+  const NSLOTS = params?.nSlots ?? 5;
   const tradeLog = [];
   let id = 1;
 
