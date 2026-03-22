@@ -179,18 +179,24 @@ export const getStockHardStop = (stockCode, yyyyMM, atrMult = 2.0, atrOverride =
 export function runBacktest(period, params, customRange = null) {
   let raw;
   let nMonths = KPI_BY_PERIOD[period]?.months || EQUITY_CURVE_RAW.length;
+  let monthly;
   if (period === "커스텀" && customRange?.start && customRange?.end) {
     const si = EQUITY_CURVE_RAW.findIndex(e => e.d === customRange.start);
     const ei = EQUITY_CURVE_RAW.findIndex(e => e.d === customRange.end);
     raw = (si >= 0 && ei >= si) ? EQUITY_CURVE_RAW.slice(si, ei + 1) : EQUITY_CURVE_RAW;
     nMonths = raw.length;
+    // ★ Fix: monthly도 날짜 기준으로 자름 (기존: 끝에서 nMonths개 → 잘못된 기간)
+    const msi = ALL_MONTHLY.findIndex(m => m.date === customRange.start);
+    const mei = ALL_MONTHLY.findIndex(m => m.date === customRange.end);
+    monthly = (msi >= 0 && mei >= msi)
+      ? ALL_MONTHLY.slice(msi, mei + 1)
+      : ALL_MONTHLY.slice(Math.max(0, ALL_MONTHLY.length - (nMonths - 1)));
   } else {
     raw = EQUITY_CURVE_RAW.slice(-nMonths);
+    const startIdx = ALL_MONTHLY.length - (nMonths - 1);
+    monthly = ALL_MONTHLY.slice(Math.max(0, startIdx));
   }
   const base = raw[0].k;
-
-  const startIdx = ALL_MONTHLY.length - (nMonths - 1);
-  const monthly  = ALL_MONTHLY.slice(Math.max(0, startIdx));
 
   const sigThreshBase = Math.max(0.8, (params.adx - 20) * 0.15);
   const sigThresh = sigThreshBase * Math.max(0.6, params.zscore * 0.35);
@@ -462,18 +468,24 @@ export function runBacktestLive(period, params, customRange = null, liveData = n
   const kpiMap  = computeKPIByPeriod(_curve);
   let nMonths   = kpiMap[period]?.months ?? _curve.length;
 
+  let monthly;
   if (period === "커스텀" && customRange?.start && customRange?.end) {
     const si = _curve.findIndex(e => e.d === customRange.start);
     const ei = _curve.findIndex(e => e.d === customRange.end);
     raw = (si >= 0 && ei >= si) ? _curve.slice(si, ei + 1) : _curve;
     nMonths = raw.length;
+    // ★ Fix: monthly도 날짜 기준으로 자름 (기존: 끝에서 nMonths개 → 잘못된 기간)
+    const msi = _monthly.findIndex(m => m.date === customRange.start);
+    const mei = _monthly.findIndex(m => m.date === customRange.end);
+    monthly = (msi >= 0 && mei >= msi)
+      ? _monthly.slice(msi, mei + 1)
+      : _monthly.slice(Math.max(0, _monthly.length - (nMonths - 1)));
   } else {
     raw = _curve.slice(-nMonths);
+    const startIdx = _monthly.length - (nMonths - 1);
+    monthly = _monthly.slice(Math.max(0, startIdx));
   }
   const base = raw[0].k;
-
-  const startIdx = _monthly.length - (nMonths - 1);
-  const monthly  = _monthly.slice(Math.max(0, startIdx));
 
   const sigThreshBase = Math.max(0.8, (params.adx - 20) * 0.15);
   const sigThresh = sigThreshBase * Math.max(0.6, params.zscore * 0.35);
