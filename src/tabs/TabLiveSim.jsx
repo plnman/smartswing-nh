@@ -3,7 +3,7 @@
 //
 // 데이터 흐름:
 //   telegram_alert.py (GitHub Actions 15:00 KST)
-//     → pykrx T-1 종가 수집 → Telegram 발송
+//     → pykrx T-0 현재가 수집 → Telegram 발송
 //     → Firebase /daily/{YYYYMMDD} 저장
 //   이 탭:
 //     → /daily/{today}   읽기 → 매수 신호 + 청산 후보 표시
@@ -155,11 +155,11 @@ export default function TabLiveSim() {
     setAddForm({ entry_price: "", qty: "" });
   };
 
-  // ── 매도 완료 버튼 → 모달 열기 (T-1 종가 자동입력)
+  // ── 매도 완료 버튼 → 모달 열기 (T-0 현재가 자동입력)
   const handleSellClick = (code) => {
     const h = holdings[code];
     if (!h) return;
-    const t1Price = daily?.prices?.[code];   // telegram_alert.py가 저장한 T-1 종가
+    const t1Price = daily?.prices?.[code];   // telegram_alert.py가 저장한 T-0 현재가
     setSellModal({ ...h, code, t1Price });
     setSellForm({
       sell_price: t1Price ? String(Math.round(t1Price)) : "",
@@ -229,7 +229,7 @@ export default function TabLiveSim() {
   const exits      = daily?.exits   || [];
   const heldExits  = exits.filter(e => !!holdings[e.code]);   // 보유 중 → 청산 권고
   const otherExits = exits.filter(e => !holdings[e.code]);    // 미보유 → 기타 정보
-  const t1Date  = daily?.t1_date;
+  const signalDate = daily?.signal_date;
   const runAt   = daily?.run_at;
 
   return (
@@ -247,8 +247,8 @@ export default function TabLiveSim() {
         <div className="flex-1 leading-relaxed">
           {daily ? (
             <span className="text-emerald-300">
-              오늘 신호 로드 완료 &middot; T-1 기준:{" "}
-              <span className="font-bold text-white">{t1Date}</span>
+              오늘 신호 로드 완료 &middot; 기준일:{" "}
+              <span className="font-bold text-white">{signalDate}</span>
               {runAt && (
                 <span className="text-slate-500 ml-2">
                   · 실행 {new Date(runAt).toLocaleTimeString("ko-KR")}
@@ -283,7 +283,7 @@ export default function TabLiveSim() {
         title="▲ 오늘 매수 신호"
         count={signals.length}
         countColor="bg-emerald-900/60 text-emerald-300"
-        badge="T-1 종가 기준 · RSI-2 ≤ 15 + ADX ≥ 30"
+        badge="T-0 현재가 기준 · RSI-2 ≤ 15 + ADX ≥ 30"
         empty={daily ? "오늘 매수 신호 없음" : "신호 데이터 없음 — 재실행 또는 15:00 이후 확인"}
       >
         {signals.map((s, i) => {
@@ -599,7 +599,7 @@ export default function TabLiveSim() {
                     {sellModal.t1Price ? (
                       <span className="text-[10px] px-1.5 py-0.5 rounded
                         bg-sky-900/50 text-sky-400 border border-sky-700/40">
-                        T-1 종가 자동입력 · 수정 가능
+                        당일 현재가 자동입력 · 수정 가능
                       </span>
                     ) : (
                       <span className="text-[10px] text-slate-600">

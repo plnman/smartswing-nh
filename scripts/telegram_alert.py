@@ -2,9 +2,9 @@
 """
 SmartSwing-NH  ·  Daily 15:00 Telegram Alert
 ────────────────────────────────────────────
-• 평일(월~금) 15:00 KST 실행 (T-1 종가 기반 실제 신호)
-• pykrx로 전일 종가·RSI-2·ADX 수집 → 전략 규칙 적용 → Telegram 발송
-• T-1 기준: 오늘 15:00에 어제 종가로 오늘 진입 여부 판단 (퀀트 표준)
+• 평일(월~금) 15:00 KST 실행 (T-0 당일 현재가 기준 실제 신호)
+• pykrx로 당일 현재가·RSI-2·ADX 수집 → 전략 규칙 적용 → Telegram 발송
+• T-0 기준: 15:00 현재가로 신호 판단 (당일 데이터 미수신 시 T-1 자동 fallback)
 """
 
 import os
@@ -164,47 +164,62 @@ def calc_adx(df: pd.DataFrame, period: int = 14) -> float:
         return 0.0
 
 # ─────────────────────────────────────────────
-#  실제 신호 생성 (T-1 종가 기준)
+#  실제 신호 생성 (T-0 당일 현재가 기준)
 # ─────────────────────────────────────────────
 def get_real_signals(today: datetime.datetime):
     """
-    T-1(전일) 종가 기준 실제 매수/청산 신호 생성.
+    T-0(당일) 15:00 현재가 기준 실제 매수/청산 신호 생성.
+    15:00 KST 실행이므로 pykrx에서 당일 실시간 현재가를 수집.
+    당일 데이터 미수신 시 T-1 종가로 자동 fallback.
     • 매수:    RSI-2 ≤ 15  AND  ADX ≥ 30
     • 청산후보: RSI-2 ≥ 99
     """
-    # T-1 날짜 계산 (주말 보정)
+    today_str = today.strftime("%Y%m%d")
+
+    # T-1 날짜 (fallback용)
     t1 = today - datetime.timedelta(days=1)
     while t1.weekday() >= 5:
         t1 -= datetime.timedelta(days=1)
     t1_str = t1.strftime("%Y%m%d")
-    print(f"  T-1 날짜: {t1_str}")
 
-    signals = []
-    exits   = []
-    skipped = []
-    prices  = {}   # {code: T-1 종가} — 전 종목 저장, 매도 모달 자동입력용
+    print(f"  기준 날짜: {today_str} (T-0 현재가) — fallback: {t1_str}")
+
+    signals        = []
+    exits          = []
+    skipped        = []
+    prices         = {}   # {code: 현재가} — 전 종목 저장, 매도 모달 자동입력용
+    fallback_codes = []   # T-1 fallback 사용된 종목
 
     for name, code, slot in STOCK_POOL:
-        df = fetch_ohlcv(code, t1_str, n_days=30)
+        # T-0 먼저 시도
+        df = fetch_ohlcv(code, today_str, n_days=30)
+        is_fallback = False
+
+        if df.empty or len(df) < 5:
+            # 당일 데이터 미수신 → T-1 fallback
+            df = fetch_ohlcv(code, t1_str, n_days=30)
+            is_fallback = True
+            fallback_codes.append(f"{name}({code})")
 
         if df.empty or len(df) < 5:
             skipped.append(f"{name}({code})")
             continue
 
-        close_t1 = float(df["종가"].iloc[-1])
-        rsi2     = calc_rsi2(df["종가"])
-        adx      = calc_adx(df)
+        current_price = float(df["종가"].iloc[-1])
+        rsi2          = calc_rsi2(df["종가"])
+        adx           = calc_adx(df)
 
-        prices[code] = close_t1   # 전 종목 T-1 종가 기록
+        prices[code] = current_price   # 현재가 기록
 
-        print(f"  {name}({code}): 종가={close_t1:,.0f}  RSI-2={rsi2}  ADX={adx}")
+        fb_mark = " [T-1 fallback]" if is_fallback else ""
+        print(f"  {name}({code}): 현재가={current_price:,.0f}  RSI-2={rsi2}  ADX={adx}{fb_mark}")
 
         # 매수 신호: 과매도 + 추세 확인
         if rsi2 <= PARAMS["rsi2Entry"] and adx >= PARAMS["adxMin"]:
-            qty = int(CAPITAL_PER_SLOT / close_t1) if close_t1 > 0 else 0
+            qty = int(CAPITAL_PER_SLOT / current_price) if current_price > 0 else 0
             signals.append({
                 "name": name, "code": code, "slot": slot,
-                "price": close_t1, "qty": qty,
+                "price": current_price, "qty": qty,
                 "rsi2": rsi2, "adx": adx,
             })
         # 청산 후보: 과매수
@@ -215,22 +230,29 @@ def get_real_signals(today: datetime.datetime):
 
     if skipped:
         print(f"  ⚠ 데이터 없음: {', '.join(skipped)}")
+    if fallback_codes:
+        print(f"  ⚠ T-1 fallback 사용: {', '.join(fallback_codes)}")
 
-    return signals, exits, t1_str, prices
+    is_fallback_all = len(fallback_codes) > 0
+    return signals, exits, today_str, prices, is_fallback_all
 
 # ─────────────────────────────────────────────
 #  메시지 빌드
 # ─────────────────────────────────────────────
-def build_message(today, signals, exits, t1_str, kpi_data=None):
+def build_message(today, signals, exits, signal_date, kpi_data=None, is_fallback=False):
     date_str = today.strftime("%Y-%m-%d")
     time_str = today.strftime("%H:%M")
 
     # KPI: 인자로 전달된 live 값 우선, 없으면 fallback
     kpi_map = kpi_data if kpi_data else KPI_FALLBACK
 
+    price_basis = f"T-0 현재가 ({signal_date})"
+    if is_fallback:
+        price_basis += " ⚠ 일부 T-1 fallback"
+
     lines = [
         f"📊 <b>SmartSwing-NH</b>  <code>{date_str}  {time_str}</code>",
-        f"<i>기준: T-1 종가 ({t1_str})</i>",
+        f"<i>기준: {price_basis}</i>",
         "",
     ]
 
@@ -278,11 +300,13 @@ def build_message(today, signals, exits, t1_str, kpi_data=None):
 # ─────────────────────────────────────────────
 #  Firebase /daily/{YYYYMMDD} 저장
 # ─────────────────────────────────────────────
-def save_to_firebase(today_str: str, signals: list, exits: list, t1_str: str, prices: dict = None):
+def save_to_firebase(today_str: str, signals: list, exits: list,
+                     signal_date: str, prices: dict = None, is_fallback: bool = False):
     """
     Firebase Firestore /daily/{YYYYMMDD} 에 오늘 신호 저장.
     TabLiveSim 탭에서 실시간 신호를 읽어 보여주는 데 사용.
-    prices: {code: T-1 종가} — 매도 모달 자동입력용
+    prices:      {code: 현재가} — 매도 모달 자동입력용 (T-0, fallback 시 T-1)
+    is_fallback: T-1 fallback 사용 여부
     FIREBASE_CREDENTIALS 없으면 조용히 건너뜀.
     """
     cred_json = os.environ.get("FIREBASE_CREDENTIALS")
@@ -302,14 +326,15 @@ def save_to_firebase(today_str: str, signals: list, exits: list, t1_str: str, pr
 
         # exits 리스트의 'exit' 키 이름 충돌 방지 (Python 예약어 아님, 안전)
         doc = {
-            "signals":  signals,
-            "exits":    exits,
-            "t1_date":  t1_str,
-            "run_at":   datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "date":     f"{today_str[:4]}-{today_str[4:6]}-{today_str[6:]}",
+            "signals":     signals,
+            "exits":       exits,
+            "signal_date": signal_date,        # T-0 기준일 (fallback 시 T-0 그대로 기록)
+            "is_fallback": is_fallback,        # True면 일부 종목 T-1 fallback 사용
+            "run_at":      datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "date":        f"{today_str[:4]}-{today_str[4:6]}-{today_str[6:]}",
         }
         if prices:
-            doc["prices"] = prices   # {code: T-1 종가}
+            doc["prices"] = prices   # {code: 현재가 (T-0 or T-1 fallback)}
         db.collection("daily").document(today_str).set(doc)
         print(f"  ✅ Firebase /daily/{today_str} 저장 완료")
 
@@ -399,9 +424,9 @@ def main():
     kpi_data = load_kpi_from_firebase()
 
     print("📡 pykrx 실시간 데이터 수집 중...")
-    signals, exits, t1_str, prices = get_real_signals(today)
+    signals, exits, signal_date, prices, is_fallback = get_real_signals(today)
 
-    msg = build_message(today, signals, exits, t1_str, kpi_data)
+    msg = build_message(today, signals, exits, signal_date, kpi_data, is_fallback)
     print("─── 전송 메시지 ───")
     print(msg)
     print("──────────────────")
@@ -414,7 +439,7 @@ def main():
 
     # Firebase /daily/{YYYYMMDD} 저장 (TabLiveSim 탭에서 읽음)
     today_str = today.strftime("%Y%m%d")
-    save_to_firebase(today_str, signals, exits, t1_str, prices)
+    save_to_firebase(today_str, signals, exits, signal_date, prices, is_fallback)
 
     # PAT 만료 30일 전부터 매일 경고
     check_pat_expiry_alert(today)
