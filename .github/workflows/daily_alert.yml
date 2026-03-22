@@ -58,7 +58,7 @@ jobs:
   update-udb:
     name: "🔄 15:40 Firebase UDB 업데이트"
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     # schedule 트리거일 때: 06:40 cron만 실행 (06:00은 건너뜀)
     if: |
       github.event_name == 'workflow_dispatch' ||

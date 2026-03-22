@@ -437,14 +437,14 @@ def verify_kpi_consistency(py_kpi, js_kpi):
     임계값 초과 시 경고 출력.
 
     허용 편차 (근사치 알고리즘 차이 감안):
-      totalRet: ±100%p  (JS가 훨씬 정교한 시뮬이므로 크게 잡음)
-      annRet  : ±80%p
-      mdd     : ±20%p
+      totalRet: ±40%p
+      annRet  : ±30%p
+      mdd     : ±10%p
     """
     THRESHOLDS = {
-        "totalRet": 100.0,
-        "annRet":    80.0,
-        "mdd":       20.0,
+        "totalRet": 40.0,
+        "annRet":   30.0,
+        "mdd":      10.0,
     }
 
     print("\n🔍  KPI 수치 일치 검증 (Python 계산 vs Firebase 저장값)")

@@ -311,6 +311,61 @@ def save_to_firebase(today_str: str, signals: list, exits: list, t1_str: str):
 
 
 # ─────────────────────────────────────────────
+#  GitHub PAT 만료 경고 (30일 전부터 매일 알림)
+# ─────────────────────────────────────────────
+PAT_EXPIRY_DATE = datetime.date(2026, 12, 31)  # GitHub PAT 만료일
+
+def check_pat_expiry_alert(today: datetime.datetime):
+    """
+    PAT 만료 30일 전부터 매일 Telegram 경고 전송.
+    만료일: 2026-12-31 (repo+workflow scope)
+    """
+    days_left = (PAT_EXPIRY_DATE - today.date()).days
+    if days_left > 30 or days_left < 0:
+        return   # 30일 전~만료일 범위 밖 → 무시
+
+    if days_left == 0:
+        emoji = "🔴"
+        urgency = "오늘 만료!"
+    elif days_left <= 7:
+        emoji = "🔴"
+        urgency = f"만료 {days_left}일 전 (긴급)"
+    elif days_left <= 14:
+        emoji = "🟠"
+        urgency = f"만료 {days_left}일 전"
+    else:
+        emoji = "🟡"
+        urgency = f"만료 {days_left}일 전"
+
+    text = "\n".join([
+        f"{emoji} <b>GitHub PAT 만료 경고</b>",
+        f"",
+        f"SmartSwing-NH Actions 토큰이 곧 만료됩니다.",
+        f"",
+        f"⏳ 만료일: <code>{PAT_EXPIRY_DATE}</code>",
+        f"📅 오늘:   <code>{today.date()}</code>",
+        f"⚠️ 남은 기간: <b>{urgency}</b>",
+        f"",
+        f"📋 갱신 방법:",
+        f"  1. GitHub → Settings → Developer settings",
+        f"  2. Personal access tokens → 토큰 재발급",
+        f"  3. 스코프: <code>repo, workflow</code>",
+        f"  4. Firebase /config/github.pat 업데이트",
+        f"  5. git remote URL 업데이트",
+        f"",
+        f"⚙️ <code>smartswing-nh deploy (repo+workflow)</code>",
+    ])
+
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    try:
+        r = requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=15)
+        r.raise_for_status()
+        print(f"  ⚠️  PAT 만료 경고 전송 완료 ({days_left}일 남음)")
+    except Exception as e:
+        print(f"  ⚠  PAT 만료 경고 전송 실패: {e}")
+
+
+# ─────────────────────────────────────────────
 #  Telegram 전송
 # ─────────────────────────────────────────────
 def send_telegram(text: str):
@@ -353,6 +408,9 @@ def main():
     # Firebase /daily/{YYYYMMDD} 저장 (TabLiveSim 탭에서 읽음)
     today_str = today.strftime("%Y%m%d")
     save_to_firebase(today_str, signals, exits, t1_str)
+
+    # PAT 만료 30일 전부터 매일 경고
+    check_pat_expiry_alert(today)
 
 if __name__ == "__main__":
     main()
