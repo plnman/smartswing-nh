@@ -2,10 +2,9 @@
 // TabStrategy — 전략 세팅 탭 (SmartSwing_Dashboard_v3 Tab3 완전 이식)
 // params 슬라이더 + 7개 검증 체크리스트 + 기본값 버튼
 // ════════════════════════════════════════════════════════════════════════
-import React, { useState, useMemo } from "react";
+import React, { useState } from "react";
 import {
   DEFAULT_PARAMS, CAPITAL_PER_SLOT, krw,
-  runBacktest,
 } from "../backtest.js";
 
 // ── ParamSlider 컴포넌트 (Tab3 외부 정의 — React 안티패턴 방지)
@@ -46,7 +45,7 @@ const SIM_ATR = {
 };
 
 // ── 메인 전략 세팅 탭
-export default function TabStrategy({ params, setParams, setTab, period }) {
+export default function TabStrategy({ params, setParams, setTab, period, validationResults }) {
   const [saved, setSaved]     = useState(false);
   const [rerunning, setRerun] = useState(false);
 
@@ -58,6 +57,40 @@ export default function TabStrategy({ params, setParams, setTab, period }) {
 
   const handleRerun = () => {
     setRerun(true);
+
+    // ── Telegram 알림 (재실행 시 시스템 정상 확인용)
+    const BOT  = import.meta.env.VITE_TELEGRAM_BOT_TOKEN;
+    const CHAT = import.meta.env.VITE_TELEGRAM_CHAT_ID;
+    if (BOT && CHAT) {
+      const strat5y = validationResults.strat5y ?? "N/A";
+      const bh5y    = validationResults.bh5y    ?? "N/A";
+      const pass    = validationResults.passCount;
+      const total   = validationResults.total;
+      const allPass = pass === total;
+      const now     = new Date().toLocaleString("ko-KR", { timeZone: "Asia/Seoul" });
+      const text = [
+        `🔄 SmartSwing 백테스트 재실행`,
+        `⏰ ${now}`,
+        ``,
+        `⚙️ 현재 파라미터 (v11.0 기반)`,
+        `• ADX: ${params.adx} | RSI-2 진입: ${params.rsi2Entry}`,
+        `• Trailing: ${params.trailing} | Hard Stop: ${params.hardStop}%`,
+        `• ATR배수: ${params.atrMult} | ML임계: ${params.mlThresh}%`,
+        ``,
+        `📊 5년 백테스트 결과`,
+        `• 전략: +${strat5y}% | KOSPI B&H: +${bh5y}%`,
+        ``,
+        `📋 검증 체크리스트: ${pass}/${total} ${allPass ? "✅ 전항목 통과" : "❌ 미통과 항목 있음"}`,
+        ``,
+        allPass ? `🟢 시스템 정상 작동 중` : `🔴 파라미터 재검토 필요`,
+      ].join("\n");
+      fetch(`https://api.telegram.org/bot${BOT}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chat_id: CHAT, text }),
+      }).catch(() => {});  // 실패해도 UI 차단 없음
+    }
+
     setTimeout(() => { setRerun(false); setTab(0); }, 1200);
   };
 
@@ -66,54 +99,8 @@ export default function TabStrategy({ params, setParams, setTab, period }) {
     setParams({ ...DEFAULT_PARAMS });
   };
 
-  // ── 파라미터 변경 검증 체크리스트 (자동 재계산)
-  const validationResults = useMemo(() => {
-    const { curve } = runBacktest("5년", params);
-
-    const getYearRet = (startDate, endDate) => {
-      const si = curve.findIndex(p => p.date === startDate);
-      const ei = curve.findIndex(p => p.date === endDate);
-      if (si < 0 || ei < 0 || ei <= si) return null;
-      return +((curve[ei].strategy / curve[si].strategy - 1) * 100).toFixed(1);
-    };
-
-    const r2022 = getYearRet("21-12", "22-12");
-    const r2023 = getYearRet("22-12", "23-12");
-    const r2024 = getYearRet("23-12", "24-12");
-    const r2025 = getYearRet("24-12", "25-12");
-
-    let peak = 0, maxDD = 0;
-    curve.forEach(p => {
-      if (p.strategy > peak) peak = p.strategy;
-      const dd = (p.strategy - peak) / peak * 100;
-      if (dd < maxDD) maxDD = dd;
-    });
-    const mdd5y = +maxDD.toFixed(1);
-
-    const monthlyRets = [];
-    for (let i = 1; i < curve.length; i++) {
-      monthlyRets.push((curve[i].strategy - curve[i-1].strategy) / curve[i-1].strategy * 100);
-    }
-    const meanR    = monthlyRets.reduce((a, b) => a + b, 0) / monthlyRets.length;
-    const stdR     = Math.sqrt(monthlyRets.reduce((a, b) => a + (b - meanR) ** 2, 0) / monthlyRets.length);
-    const sharpe5y = stdR > 0 ? +((meanR / stdR) * Math.sqrt(12)).toFixed(2) : 0;
-
-    const strat5y = +((curve[curve.length - 1]?.strategy - 100).toFixed(1));
-    const bh5y    = +((curve[curve.length - 1]?.buyhold   - 100).toFixed(1));
-
-    const checks = [
-      { cat:"📈 상승장", label:"2023 회복(+23.5%)",  val:r2023,          pass: r2023  !== null && r2023  >= 10,   desc:"전략 ≥ +10% 포착" },
-      { cat:"📈 상승장", label:"2025 폭등(+90.7%)",  val:r2025,          pass: r2025  !== null && r2025  >= 50,   desc:"전략 ≥ +50% 포착" },
-      { cat:"📈 상승장", label:"5년 전략 > B&H",     val:strat5y - bh5y, pass: strat5y > bh5y,                   desc:"KOSPI B&H 초과 수익" },
-      { cat:"📉 하락장", label:"2022 하락(-26.4%)",   val:r2022,          pass: r2022  !== null && r2022  > -20,  desc:"전략 > -20% 방어" },
-      { cat:"📉 하락장", label:"2024 하락(-11.9%)",   val:r2024,          pass: r2024  !== null && r2024  > -8,   desc:"전략 > -8% 방어" },
-      { cat:"🛡 안전성",  label:"5년 MDD",            val:mdd5y,          pass: mdd5y  > -50,                     desc:"> -50% 준수" },
-      { cat:"🛡 안전성",  label:"Sharpe 5년",         val:sharpe5y,       pass: sharpe5y >= 0.5,                  desc:"≥ 0.5 권장" },
-    ];
-
-    const passCount = checks.filter(c => c.pass).length;
-    return { checks, passCount, total: checks.length };
-  }, [params]);
+  // ── 검증 체크리스트는 App.jsx useMemo에서 계산 후 props로 전달됨
+  // (탭 위치 무관하게 params 변경 시 항상 자동 재계산)
 
   const ps = setParams;
 
