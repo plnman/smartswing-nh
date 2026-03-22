@@ -279,64 +279,6 @@ export default function TabLiveSim() {
         </div>
       )}
 
-      {/* ── UI 샘플 안내 (하드코딩 · 클릭 불가) */}
-      <div className="rounded-xl border border-dashed border-slate-600/60 overflow-hidden">
-        <div className="flex items-center gap-2 px-4 py-2 bg-slate-800/50 border-b border-dashed border-slate-600/60">
-          <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">📋 UI 샘플 — 실제 신호 발생 시 아래와 같이 표시됩니다</span>
-        </div>
-
-        {/* 샘플 1: 매수 신호 + 버튼 */}
-        <div className="p-4 space-y-2 opacity-50 pointer-events-none bg-slate-800/30">
-          <div className="flex items-center gap-3">
-            <span className="px-2 py-0.5 rounded text-[9px] font-bold bg-slate-700 text-slate-400 border border-slate-600 shrink-0">샘플</span>
-            <span className="px-2.5 py-1 rounded-lg text-xs font-bold
-              bg-emerald-900/60 text-emerald-300 border border-emerald-700/50 shrink-0">
-              ▲ 매수
-            </span>
-            <div className="flex-1 min-w-0">
-              <span className="font-bold text-slate-200">NAVER</span>
-              <span className="text-xs text-slate-500 ml-2">035420 · 슬롯4</span>
-            </div>
-            <div className="text-right shrink-0">
-              <div className="text-xs text-slate-300">₩221,500 × 45주</div>
-              <div className="text-[10px] text-slate-500">= ₩9,967,500</div>
-            </div>
-          </div>
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="px-2 py-0.5 rounded bg-slate-700 text-emerald-400 font-mono text-[11px]">RSI-2 = 14.29 ≤ 15 ✓</span>
-            <span className="px-2 py-0.5 rounded bg-slate-700 text-sky-400 font-mono text-[11px]">ADX = 35.4 ≥ 30 ✓</span>
-            <button className="ml-auto px-3 py-1 text-xs font-semibold rounded-lg
-              bg-emerald-800 text-emerald-200">
-              + 매수 등록
-            </button>
-          </div>
-        </div>
-
-        {/* 샘플 2: 매수 후 보유 중 */}
-        <div className="p-4 space-y-2 opacity-50 pointer-events-none bg-slate-800/30 border-t border-dashed border-slate-600/40">
-          <div className="flex items-center gap-3">
-            <span className="px-2 py-0.5 rounded text-[9px] font-bold bg-slate-700 text-slate-400 border border-slate-600 shrink-0">샘플</span>
-            <span className="px-2.5 py-1 rounded-lg text-xs font-bold
-              bg-emerald-900/60 text-emerald-300 border border-emerald-700/50 shrink-0">
-              ▲ 매수
-            </span>
-            <div className="flex-1 min-w-0">
-              <span className="font-bold text-slate-200">NAVER</span>
-              <span className="text-xs text-slate-500 ml-2">035420 · 슬롯4</span>
-            </div>
-            <div className="text-right shrink-0">
-              <div className="text-xs text-slate-300">₩221,500 × 45주</div>
-              <div className="text-[10px] text-slate-500">= ₩9,967,500</div>
-            </div>
-          </div>
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="px-2 py-0.5 rounded bg-slate-700 text-emerald-400 font-mono text-[11px]">RSI-2 = 14.29 ≤ 15 ✓</span>
-            <span className="px-2 py-0.5 rounded bg-slate-700 text-sky-400 font-mono text-[11px]">ADX = 35.4 ≥ 30 ✓</span>
-            <span className="ml-auto text-xs text-yellow-400 font-semibold">🟡 보유 중</span>
-          </div>
-        </div>
-      </div>
-
       {/* ── 매수 신호 */}
       <SignalSection
         title="▲ 오늘 매수 신호"
@@ -515,25 +457,36 @@ export default function TabLiveSim() {
         )}
       </div>
 
-      {/* ── UDB 현황 (소형) */}
-      {udbMonths.length > 0 && (
-        <div className="bg-slate-800/60 rounded-xl p-3 border border-slate-700/40">
-          <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">
-            UDB 누적 ({udbMonths.length}개월)
-          </p>
-          <div className="flex flex-wrap gap-1">
+      {/* ── UDB 누적 현황 */}
+      <div className="bg-slate-800/60 rounded-xl border border-slate-700/40">
+        <div className="flex items-center gap-2 p-3 border-b border-slate-700/40">
+          <span className="text-xs font-bold text-slate-300">📦 UDB 누적 현황</span>
+          <span className="text-[10px] bg-slate-700 text-slate-400 px-2 py-0.5 rounded-full">
+            {udbMonths.length}개월
+          </span>
+          <span className="ml-auto text-[10px] text-slate-500">
+            매월 마지막 거래일 15:40 수집 · 백테스팅 확장 데이터
+          </span>
+        </div>
+        {udbMonths.length === 0 ? (
+          <div className="p-4 text-center text-slate-600 text-xs">
+            아직 UDB 데이터 없음 — 월말 마지막 거래일 15:40에 자동 수집됩니다
+          </div>
+        ) : (
+          <div className="p-3 flex flex-wrap gap-1.5">
             {udbMonths.map(m => (
-              <span key={m.date} className={`text-[10px] px-1.5 py-0.5 rounded ${
+              <span key={m.date} className={`text-[11px] px-2 py-1 rounded-lg font-mono ${
                 m.r >= 0
-                  ? "bg-emerald-900/40 text-emerald-500"
-                  : "bg-red-900/40 text-red-500"
+                  ? "bg-emerald-900/40 text-emerald-400 border border-emerald-800/50"
+                  : "bg-red-900/40 text-red-400 border border-red-800/50"
               }`}>
-                {m.date} {m.r >= 0 ? "+" : ""}{m.r}%
+                {m.date}&nbsp;
+                <span className="font-bold">{m.r >= 0 ? "+" : ""}{m.r}%</span>
               </span>
             ))}
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
 
       {/* ── 매수 등록 모달 */}
