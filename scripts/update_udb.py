@@ -180,15 +180,36 @@ def calc_stock_monthly_return(code: str, year: int, month: int) -> float:
 
 
 def get_kospi200_monthly_return(year: int, month: int) -> float:
-    """KOSPI200(지수코드 1028) 월간 수익률 (%)"""
+    """KOSPI200(지수코드 1028) 월간 수익률 (%)
+    GDB 스키마 기준 = (당월 마지막 이용가능 종가 / 전월 마지막 거래일 종가 - 1) × 100
+    iloc[0] 기준(당월 첫 거래일)은 GDB와 기준점이 달라 사용 금지.
+    """
     try:
-        last_day = calendar.monthrange(year, month)[1]
-        start_str = f"{year}{month:02d}01"
+        prev_month = month - 1 if month > 1 else 12
+        prev_year  = year if month > 1 else year - 1
+        last_day   = calendar.monthrange(year, month)[1]
+
+        # 전월 1일 ~ 당월 말일 조회 (전월 말 종가 확보를 위해)
+        start_str = f"{prev_year}{prev_month:02d}01"
         end_str   = f"{year}{month:02d}{last_day}"
+
         df = pykrx_stock.get_index_ohlcv_by_date(start_str, end_str, "1028")
-        if len(df) < 2:
+        if df.empty:
             return 0.0
-        r = (float(df["종가"].iloc[-1]) / float(df["종가"].iloc[0]) - 1) * 100
+
+        df.index = df.index.tz_localize(None) if df.index.tzinfo else df.index
+        prev_df = df[df.index.to_period("M").astype(str) == f"{prev_year}-{prev_month:02d}"]
+        curr_df = df[df.index.to_period("M").astype(str) == f"{year}-{month:02d}"]
+
+        if prev_df.empty or curr_df.empty:
+            return 0.0
+
+        prev_close = float(prev_df["종가"].iloc[-1])  # 전월 마지막 거래일 종가
+        curr_close = float(curr_df["종가"].iloc[-1])  # 당월 현재까지 마지막 종가
+
+        if prev_close == 0:
+            return 0.0
+        r = (curr_close / prev_close - 1) * 100
         return round(r, 2)
     except Exception as e:
         print(f"  ⚠  KOSPI200 수익률 계산 실패: {e}")
