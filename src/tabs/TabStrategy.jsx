@@ -46,8 +46,9 @@ const SIM_ATR = {
 
 // ── 메인 전략 세팅 탭
 export default function TabStrategy({ params, setParams, setTab, period, validationResults }) {
-  const [saved, setSaved]     = useState(false);
-  const [rerunning, setRerun] = useState(false);
+  const [saved,        setSaved]       = useState(false);
+  const [defaultSaved, setDefaultSaved] = useState(false);
+  const [rerunning,    setRerun]        = useState(false);
 
   const handleSave = () => {
     try { localStorage.setItem("smartswing_params", JSON.stringify(params)); } catch(e) {}
@@ -94,9 +95,26 @@ export default function TabStrategy({ params, setParams, setTab, period, validat
     setTimeout(() => { setRerun(false); setTab(0); }, 1200);
   };
 
+  // ── 기본값변경: 현재 params를 "사용자 기본값"으로 등록
+  const handleSetDefault = () => {
+    try { localStorage.setItem("smartswing_user_default", JSON.stringify(params)); } catch(e) {}
+    setDefaultSaved(true);
+    setTimeout(() => setDefaultSaved(false), 2500);
+  };
+
+  // ── 기본값 복원: 사용자 기본값 → 없으면 빌트인 DEFAULT_PARAMS
   const handleReset = () => {
-    try { localStorage.removeItem("smartswing_params"); } catch(e) {}
-    setParams({ ...DEFAULT_PARAMS });
+    try {
+      const userDef = localStorage.getItem("smartswing_user_default");
+      if (userDef) {
+        setParams({ ...DEFAULT_PARAMS, ...JSON.parse(userDef) });
+      } else {
+        setParams({ ...DEFAULT_PARAMS });
+      }
+      localStorage.removeItem("smartswing_params");
+    } catch(e) {
+      setParams({ ...DEFAULT_PARAMS });
+    }
   };
 
   // ── 검증 체크리스트는 App.jsx useMemo에서 계산 후 props로 전달됨
@@ -116,7 +134,12 @@ export default function TabStrategy({ params, setParams, setTab, period, validat
 
       {saved && (
         <div className="px-4 py-2.5 bg-emerald-900/40 border border-emerald-600 rounded-xl text-sm text-emerald-300 flex items-center gap-2">
-          ✅ 설정이 저장되었습니다.
+          ✅ 설정이 저장되었습니다. <span className="text-[11px] text-emerald-500 ml-1">(프론트엔드 백테스팅 표시 기준 — 텔레그램 신호 발생은 GitHub Actions 내부 PARAMS 별도 관리)</span>
+        </div>
+      )}
+      {defaultSaved && (
+        <div className="px-4 py-2.5 bg-amber-900/40 border border-amber-600 rounded-xl text-sm text-amber-300 flex items-center gap-2">
+          🎯 현재 파라미터가 <span className="font-bold">나만의 기본값</span>으로 등록됐습니다. 이후 🔁 기본값 복원 시 이 설정으로 리셋됩니다.
         </div>
       )}
 
@@ -403,13 +426,23 @@ export default function TabStrategy({ params, setParams, setTab, period, validat
             : "🔄 백테스트 재실행"}
         </button>
         <button onClick={handleSave}
-          className={`flex-1 py-2.5 text-sm font-semibold rounded-xl transition-all ${saved ? "bg-emerald-700 text-emerald-200" : "bg-slate-700 hover:bg-slate-600 text-slate-200"}`}>
+          className={`flex-1 py-2.5 text-sm font-semibold rounded-xl transition-all ${saved ? "bg-emerald-700 text-emerald-200" : "bg-slate-700 hover:bg-slate-600 text-slate-200"}`}
+          title="현재 파라미터를 저장 (프론트엔드 백테스팅 기준)">
           {saved ? "✅ 저장 완료!" : "💾 설정 저장"}
         </button>
+        <button onClick={handleSetDefault}
+          className={`flex-1 py-2.5 text-sm font-semibold rounded-xl transition-all border ${
+            defaultSaved
+              ? "bg-amber-700 text-amber-200 border-amber-600"
+              : "bg-slate-800 hover:bg-amber-900/40 hover:border-amber-700/60 hover:text-amber-300 text-slate-300 border-slate-600"
+          }`}
+          title="현재 파라미터를 '나만의 기본값'으로 등록 — 이후 🔁 기본값 복원 시 이 값으로 리셋됨">
+          {defaultSaved ? "🎯 기본값 등록 완료!" : "🎯 기본값변경"}
+        </button>
         <button onClick={handleReset}
-          className="px-5 py-2.5 bg-slate-800 hover:bg-red-900/50 hover:border-red-700 hover:text-red-300 text-slate-400 text-sm rounded-xl border border-slate-600 transition-all"
-          title="모든 파라미터를 초기 기본값으로 복원">
-          🔁 기본값
+          className="px-4 py-2.5 bg-slate-800 hover:bg-red-900/50 hover:border-red-700 hover:text-red-300 text-slate-400 text-sm rounded-xl border border-slate-600 transition-all"
+          title="나만의 기본값(없으면 빌트인 기본값)으로 복원">
+          🔁 복원
         </button>
       </div>
 

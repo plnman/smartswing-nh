@@ -370,7 +370,7 @@ export default function TabLiveSim() {
               className="px-3 py-1 text-xs font-semibold rounded-lg shrink-0 transition-all
                 bg-red-900 hover:bg-red-800 text-red-200"
             >
-              매도 완료
+              📤 매도 처리
             </button>
           </div>
         ))}
@@ -434,6 +434,10 @@ export default function TabLiveSim() {
                     <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-900/50 text-indigo-400">
                       슬롯{h.slot}
                     </span>
+                    {/* 보유 상태 뱃지 — "매도 완료" 버튼과 혼동 방지 */}
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-900/50 text-emerald-400 border border-emerald-700/50 font-semibold">
+                      🟢 보유중
+                    </span>
                     <span className="text-[10px] text-slate-600">진입 {h.entry_date}</span>
                   </div>
                   <div className="mt-1 text-xs text-slate-400 flex items-center gap-3">
@@ -444,12 +448,14 @@ export default function TabLiveSim() {
                     </span>
                   </div>
                 </div>
+                {/* "매도 완료" → "📤 매도 처리"로 변경 — 상태가 아니라 액션임을 명확히 */}
                 <button
                   onClick={() => handleSellClick(h.code)}
                   className="px-3 py-1.5 text-xs rounded-lg shrink-0 transition-all
-                    bg-slate-700 hover:bg-red-900 text-slate-400 hover:text-red-200"
+                    bg-slate-700 hover:bg-red-900/70 hover:border hover:border-red-700/60
+                    text-slate-400 hover:text-red-300"
                 >
-                  매도 완료
+                  📤 매도 처리
                 </button>
               </div>
             ))}
