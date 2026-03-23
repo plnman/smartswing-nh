@@ -31,7 +31,7 @@ jobs:
   send-alert:
     name: "📨 15:00 Telegram 알림"
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 25
     # workflow_dispatch(외부 크론 or 수동) 또는 안전망 cron 14:10(UTC 05:10)만 실행
     if: |
       github.event_name == 'workflow_dispatch' ||
@@ -47,7 +47,7 @@ jobs:
           python-version: "3.11"
 
       - name: 의존성 설치
-        run: pip install requests pykrx pandas firebase-admin
+        run: pip install requests pykrx pandas numpy xgboost scikit-learn firebase-admin
 
       - name: 15:00 KST Telegram 알림 전송
         env:
