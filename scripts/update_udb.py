@@ -380,15 +380,13 @@ def main():
         print("주말 — 업데이트 건너뜀")
         return
 
-    # 월말 마지막 거래일 체크 (FORCE_RUN 시 우회)
-    if not is_last_trading_day_of_month(today) and not force:
-        print(f"오늘({today.date()})은 이번달 마지막 거래일이 아님 — 업데이트 건너뜀")
-        print("  ※ 매월 마지막 거래일 15:40에만 자동 실행됩니다.")
-        return
-
+    # ★ v2: 매일 당월 누적 수익률 저장 (월말 체크 제거)
+    #   → backtest.js buildLiveMonthly가 GDB_LAST >= 조건으로 당월 실시간 반영
     year  = today.year
     month = today.month
     date_str = today.strftime("%Y%m%d")  # "YYYYMMDD"
+
+    print(f"  ★ 당월({year}-{month:02d}) UDB 매일 업데이트 모드 (월말 체크 제거)")
 
     # 데이터 수집
     doc_data = build_udb_document(year, month, date_str)

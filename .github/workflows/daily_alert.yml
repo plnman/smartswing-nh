@@ -47,7 +47,7 @@ jobs:
           python-version: "3.11"
 
       - name: 의존성 설치
-        run: pip install requests pykrx pandas numpy xgboost scikit-learn firebase-admin
+        run: pip install requests pykrx pandas numpy firebase-admin
 
       - name: 15:00 KST Telegram 알림 전송
         env:

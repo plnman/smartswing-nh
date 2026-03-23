@@ -202,13 +202,12 @@ export default function TabStrategy({ params, setParams, setTab, period, validat
           <div className="flex items-center gap-2 mb-3">
             <span className="px-2 py-0.5 bg-indigo-900 text-indigo-200 rounded text-xs font-bold">L1</span>
             <p className="text-xs font-bold text-slate-300">Market Shield</p>
-            <span className="ml-auto text-[9px] px-1.5 py-0.5 bg-amber-900/60 text-amber-300 rounded border border-amber-700/50">⚠ proxy 미작동</span>
+            <span className="ml-auto text-[9px] px-1.5 py-0.5 bg-emerald-900/60 text-emerald-300 rounded border border-emerald-700/50">✅ 실전 작동</span>
           </div>
-          <div className="mb-2 p-2 bg-amber-950/40 border border-amber-800/40 rounded-lg text-[9px] text-amber-300 leading-relaxed">
-            <span className="font-bold text-amber-200">현재 proxy 비활성</span> — 직전월 KOSPI 수익률 기반 proxy는 5년 시뮬(2021~2026) 전체에서 <span className="font-bold">차단 0건</span>. 대형 하락 직전달이 대부분 보합(-0.15% 수준)이어서 임계값 도달 불가. KIS API 실연동 시 실효 예정.
+          <div className="mb-2 p-2 bg-emerald-950/40 border border-emerald-800/40 rounded-lg text-[9px] text-emerald-300 leading-relaxed">
+            <span className="font-bold text-emerald-200">v3 실전 작동</span> — 당월 KOSPI200 하락(&lt;-1%) AND 전월수익률/15 &lt; finBertThresh 동시 충족 시 해당 월 신호 전체 차단
           </div>
-          <ParamSlider label="FinBERT 감성 임계값" val={params.finBertThresh} min={-1} max={0} step={0.1} unit="" note="직전월 KOSPI 정규화 proxy — 현재 임계값에서 미작동 (KIS API 연동 후 실효)" pk="finBertThresh" setParams={ps}/>
-          <ParamSlider label="최소 뉴스 수" val={10} min={5} max={30} step={1} unit="개" note="실전 KIS API 연동 시 활성화 (현재 UI 표시 전용)" setParams={ps}/>
+          <ParamSlider label="finBertThresh (전월 수익률/15 하한)" val={params.finBertThresh} min={-0.5} max={0.5} step={0.05} unit="" note={`전월 KOSPI200 수익률/15 < ${params.finBertThresh} → L1 차단 (당월 하락일 때만)`} pk="finBertThresh" setParams={ps}/>
         </div>
 
         {/* ── L2 Trend & Pullback */}
@@ -222,27 +221,35 @@ export default function TabStrategy({ params, setParams, setTab, period, validat
           <ParamSlider label="이격도 하한 SMA20" val={97} min={90} max={100} step={1} unit="%" note="시뮬 미반영 — UI 표시 전용" setParams={ps}/>
         </div>
 
-        {/* ── L3 Volume Gate */}
+        {/* ── L3 CVD + sigThresh */}
         <div className="bg-slate-800 rounded-xl p-4 border border-slate-700">
           <div className="flex items-center gap-2 mb-3">
             <span className="px-2 py-0.5 bg-emerald-900 text-emerald-200 rounded text-xs font-bold">L3</span>
-            <p className="text-xs font-bold text-slate-300">Volume Gate</p>
-            <span className="ml-auto text-[9px] px-1.5 py-0.5 bg-emerald-900/60 text-emerald-300 rounded">프록시 시뮬 반영</span>
+            <p className="text-xs font-bold text-slate-300">CVD + 시장 모멘텀</p>
+            <span className="ml-auto text-[9px] px-1.5 py-0.5 bg-emerald-900/60 text-emerald-300 rounded">✅ 실전 작동</span>
           </div>
-          <ParamSlider label="Vol Z-Score (≥)" val={params.zscore} min={1.5} max={3.5} step={0.5} unit="" note="신호 강도 임계값: 높을수록 강한 움직임만 진입" pk="zscore" setParams={ps}/>
-          <ParamSlider label="CVD 롤링 윈도우" val={params.cvdWin} min={30} max={90} step={15} unit="일" note={`매수/매도 압력 추적 기간 → ${Math.max(1,Math.round(params.cvdWin/15))}개월 lookback`} pk="cvdWin" setParams={ps}/>
-          <ParamSlider label="CVD 필터 강도" val={params.cvdCompare} min={3} max={10} step={1} unit="" note="매도 우위 판단 기준 (낮을수록 하락장 진입 차단 강화)" pk="cvdCompare" setParams={ps}/>
+          <ParamSlider label="Vol Z-Score (sigThresh 인자)" val={params.zscore} min={0.5} max={3.5} step={0.5} unit=""
+            note={`sigThresh = max(0.8,(adx-20)×0.15)×max(0.6,zscore×0.35) = ${(Math.max(0.8,(params.adx-20)*0.15)*Math.max(0.6,params.zscore*0.35)).toFixed(3)}`}
+            pk="zscore" setParams={ps}/>
+          <ParamSlider label="CVD 롤링 윈도우" val={params.cvdWin} min={30} max={90} step={15} unit="일"
+            note={`KOSPI200 월별 방향 카운트 기간 → ${Math.max(1,Math.round(params.cvdWin/15))}개월`}
+            pk="cvdWin" setParams={ps}/>
+          <ParamSlider label="CVD Gate 강도" val={params.cvdCompare} min={3} max={10} step={1} unit=""
+            note={`cvdGate = -floor(${params.cvdCompare}/2) = ${-Math.floor(params.cvdCompare/2)}  (netCVD ≤ 이 값 AND 하락 → 차단)`}
+            pk="cvdCompare" setParams={ps}/>
         </div>
 
-        {/* ── L4 ML Approval */}
+        {/* ── L4 약한 모멘텀 슬롯 조정 */}
         <div className="bg-slate-800 rounded-xl p-4 border border-slate-700">
           <div className="flex items-center gap-2 mb-3">
             <span className="px-2 py-0.5 bg-purple-900 text-purple-200 rounded text-xs font-bold">L4</span>
-            <p className="text-xs font-bold text-slate-300">ML Approval</p>
+            <p className="text-xs font-bold text-slate-300">약한 모멘텀 조정</p>
+            <span className="ml-auto text-[9px] px-1.5 py-0.5 bg-purple-900/60 text-purple-300 rounded">백테스팅 동일</span>
           </div>
-          <ParamSlider label="XGBoost 임계값" val={params.mlThresh} min={60} max={80} step={5} unit="%" pk="mlThresh" setParams={ps}/>
+          <ParamSlider label="mlThresh (슬롯 조정)" val={params.mlThresh} min={55} max={80} step={5} unit="" pk="mlThresh" setParams={ps}/>
           <div className="p-2 bg-purple-900/20 rounded-lg border border-purple-800/40 text-[10px] text-purple-300 mb-2">
-            <span className="font-bold">[v10]</span> CalibratedClassifierCV(isotonic) 적용
+            <span className="font-bold">[v3]</span> |KOSPI| &lt; sigThresh×2 (약한 모멘텀) 시 유효 슬롯 = nSlots÷2<br/>
+            mlThresh={params.mlThresh} → mlPassMax={100-(params.mlThresh-55)} → {Math.round((100-(params.mlThresh-55))/100*100)}% 거래 허용
           </div>
         </div>
       </div>
@@ -367,14 +374,14 @@ export default function TabStrategy({ params, setParams, setTab, period, validat
         </div>
         <div className="grid grid-cols-2 gap-2 text-[11px]">
           {[
-            { name:"RSI-2", calc:"최근 2일 Gain/Loss 평균", setting:"rsi2Entry ≤ 15 진입  rsi2Exit ≥ 99 청산", active:true },
-            { name:"ADX(14)", calc:"EWM 14일 — 60 거래일 데이터 기반", setting:`adxMin ≥ ${params.adx} (L2 설정)`, active:true },
-            { name:"ATR(14)", calc:"True Range EWM 14일", setting:"hardStop 손절 기준 (atrMult × ATR)", active:true },
+            { name:"KOSPI200 시장타이밍", calc:`sigThresh=${(Math.max(0.8,(params.adx-20)*0.15)*Math.max(0.6,params.zscore*0.35)).toFixed(3)} — 당월 수익률 절대값 기준`, setting:"L0: |KOSPI 당월수익률| < sigThresh → 진입 없음", active:true },
+            { name:"L1 Market Shield", calc:"당월 하락 + 전월 약세 동시 차단", setting:`finBertThresh=${params.finBertThresh} (전월 수익률/15 하한)`, active:true },
+            { name:"L3 CVD Gate", calc:`KOSPI200 최근 ${Math.max(1,Math.round(params.cvdWin/15))}개월 방향 net 카운트`, setting:`cvdGate=${-Math.floor(params.cvdCompare/2)} — 매도 우위 + 하락장 → 차단`, active:true },
+            { name:"RSI-2", calc:"최근 2일 Gain/Loss 평균 — 종목 스크리닝", setting:`≤ ${params.rsi2Entry} 진입 (과매도 탐색)  ≥ ${params.rsi2Exit} 청산`, active:true },
+            { name:"ADX(14)", calc:"EWM 14일 — 60 거래일 데이터 기반", setting:`≥ ${params.adx} (L2 추세 강도 확인)`, active:true },
+            { name:"ATR(14)", calc:"True Range EWM 14일", setting:`hardStop=${params.hardStop}% 손절 기준 (알림 표시용)`, active:true },
             { name:"SMA20 이격도", calc:"종가 / 20일 이동평균", setting:"≥ 97% 기준 — 현재 UI 표시 전용, 신호에 미반영", active:false },
-            { name:"FinBERT 감성", calc:"직전월 KOSPI 수익률 proxy", setting:`임계값 ${params.finBertThresh} — KIS API 연동 전 미작동`, active:false },
-            { name:"Vol Z-Score", calc:"거래량 표준화 점수", setting:`zscore ≥ ${params.zscore} (L3 proxy 시뮬 반영)`, active:true },
-            { name:"CVD 창(Window)", calc:"매수/매도 압력 누적 비교", setting:`${params.cvdWin}일 롤링 · compare=${params.cvdCompare}`, active:true },
-            { name:"XGBoost ML", calc:"월별 시뮬 seed 기반 proxy", setting:`mlThresh ≥ ${params.mlThresh}% 승인`, active:true },
+            { name:"약한 모멘텀 슬롯", calc:"|KOSPI당월| < sigThresh×2 시 슬롯 절반", setting:`mlThresh=${params.mlThresh} → 슬롯 ${params.nSlots} → ${Math.max(1,Math.floor(params.nSlots/2))}`, active:true },
             { name:"Trailing Stop", calc:"고점 대비 하락폭 추적", setting:`${params.trailing}% 하락 시 청산`, active:true },
             { name:"Time-Cut", calc:"보유 거래일 카운터", setting:params.timeCutOn ? `${params.timeCut}거래일 초과 시 강제 청산` : "현재 OFF", active:params.timeCutOn },
           ].map(ind => (

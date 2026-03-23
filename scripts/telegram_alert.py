@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
 """
-SmartSwing-NH  ·  Daily 15:00 Telegram Alert  v2.0  (XGBoost Edition)
-────────────────────────────────────────────────────────────────────────
-GDB KOSPI200 200종목 XGBoost 스코어링 → 상위 nSlots 종목 매수 신호
+SmartSwing-NH  ·  Daily 15:00 Telegram Alert  v3.0  (안 A — 백테스팅 로직 완전 이식)
+────────────────────────────────────────────────────────────────────────────────────
+백테스팅(backtest.js)과 동일한 판단 로직:
 
-피처 (9개):
-  RSI-2, RSI-14, ADX-14, Vol Z-Score, CVD net, Mom5, Mom20, BB %B, KOSPI 1m
+  [시장 타이밍 필터]
+  sigThresh = max(0.8, (adx-20)*0.15) × max(0.6, zscore*0.35)
+  당월 KOSPI200 |수익률| < sigThresh → 매수 신호 없음
 
-학습:
-  과거 300 거래일 데이터 / 레이블 = 5일 후 종가 > 오늘 종가 (binary)
+  [L1] 하락장 + 전월 약세 차단
+  당월 r < -1% AND 전월 r/15 < finBertThresh → 차단
 
-랭킹:
-  200종목 전체 스코어링 → predict_proba 점수 내림차순
-  상위 nSlots 종목 → 슬롯 1,2,...,nSlots (점수 1위 = 슬롯1 = 최우선)
-  점수 ≥ mlThresh/100 이어야 최종 매수 신호 확정
+  [L3] CVD 차단
+  최근 cvdWin/15 개월 KOSPI200 net 방향 ≤ cvdGate AND 하락장 → 차단
+
+  [약한 모멘텀] |r| < sigThresh×2 → 슬롯 수 절반
+
+  [종목 스크리닝]  (seed 랜덤 폐기 → 실제 기술지표)
+  RSI-2 ≤ rsi2Entry  AND  ADX ≥ adx 만족 종목
+  RSI-2 낮은 순 정렬 → 상위 nSlots 매수
+
+  [청산] RSI-2 ≥ rsi2Exit
 """
 
 import os
@@ -242,14 +249,21 @@ GDB_STOCK_POOL = [
 ]
 
 # ─────────────────────────────────────────────
-#  전략 파라미터 — Firebase /config/params 에서 덮어씀
+#  전략 파라미터 — backtest.js DEFAULT_PARAMS와 완전 동일
+#  Firebase /config/params 에서 덮어씀
 # ─────────────────────────────────────────────
 PARAMS = {
-    "nSlots":   5,     # 동시 보유 최대 종목 수 (상위 nSlots 매수)
-    "mlThresh": 57,    # XGBoost 최소 점수 (0~100)
-    "rsi2Exit": 99,    # RSI-2 청산 임계값
-    "hardStop": 5.3,   # 하드스탑 % (참고용)
-    "trailing": 7.6,   # 트레일링 스탑 % (참고용)
+    "adx":           20,    # ADX 최소값 (시장 추세 강도 / 종목 ADX 하한)
+    "rsi2Entry":     15,    # RSI-2 진입 임계값 (이하일 때 매수)
+    "zscore":        1.0,   # sigThresh 스케일 인자
+    "mlThresh":      57,    # 약한 모멘텀 시 슬롯 조정용 (mlPassMax = 100 - (mlThresh-55))
+    "nSlots":        5,     # 동시 보유 최대 종목 수
+    "hardStop":      5.3,   # 하드스탑 % (알림 표시용)
+    "trailing":      7.6,   # 트레일링 스탑 % (알림 표시용)
+    "rsi2Exit":      99,    # RSI-2 청산 임계값
+    "finBertThresh": 0.09,  # L1: 전월 수익률/15 임계값
+    "cvdWin":        70,    # CVD 윈도우 (일, /15 = 개월)
+    "cvdCompare":    7,     # cvdGate = -floor(7/2) = -3
 }
 
 CAPITAL_PER_SLOT = 10_000_000
@@ -289,14 +303,20 @@ def load_params_from_firebase() -> dict:
         if snap.exists:
             d = snap.to_dict()
             loaded = {
-                "nSlots":   int  (d.get("nSlots",   defaults["nSlots"])),
-                "mlThresh": int  (d.get("mlThresh",  defaults["mlThresh"])),
-                "rsi2Exit": float(d.get("rsi2Exit",  defaults["rsi2Exit"])),
-                "hardStop": float(d.get("hardStop",  defaults["hardStop"])),
-                "trailing": float(d.get("trailing",  defaults["trailing"])),
+                "adx":           float(d.get("adx",           defaults["adx"])),
+                "rsi2Entry":     float(d.get("rsi2Entry",     defaults["rsi2Entry"])),
+                "zscore":        float(d.get("zscore",        defaults["zscore"])),
+                "mlThresh":      int  (d.get("mlThresh",      defaults["mlThresh"])),
+                "nSlots":        int  (d.get("nSlots",        defaults["nSlots"])),
+                "hardStop":      float(d.get("hardStop",      defaults["hardStop"])),
+                "trailing":      float(d.get("trailing",      defaults["trailing"])),
+                "rsi2Exit":      float(d.get("rsi2Exit",      defaults["rsi2Exit"])),
+                "finBertThresh": float(d.get("finBertThresh", defaults["finBertThresh"])),
+                "cvdWin":        float(d.get("cvdWin",        defaults["cvdWin"])),
+                "cvdCompare":    float(d.get("cvdCompare",    defaults["cvdCompare"])),
             }
-            print(f"  ✅ Firebase PARAMS: nSlots={loaded['nSlots']} "
-                  f"mlThresh={loaded['mlThresh']} 청산RSI≥{loaded['rsi2Exit']}")
+            print(f"  ✅ Firebase PARAMS: adx={loaded['adx']} rsi2Entry={loaded['rsi2Entry']} "
+                  f"nSlots={loaded['nSlots']} rsi2Exit={loaded['rsi2Exit']}")
             return loaded
     except Exception as e:
         print(f"  ⚠ PARAMS 로드 실패: {e}")
@@ -336,7 +356,8 @@ def load_kpi_from_firebase() -> dict:
 
 def save_to_firebase(today_str: str, signals: list, exits: list,
                      signal_date: str, prices: dict = None,
-                     is_fallback: bool = False, scores: list = None):
+                     is_fallback: bool = False,
+                     market_info: dict = None):
     try:
         db = _init_firebase()
         if db is None:
@@ -348,16 +369,12 @@ def save_to_firebase(today_str: str, signals: list, exits: list,
             "is_fallback": is_fallback,
             "run_at":      datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "date":        f"{today_str[:4]}-{today_str[4:6]}-{today_str[6:]}",
-            "engine":      "xgboost-v2",
+            "engine":      "backtest-parity-v3",
         }
         if prices:
             doc["prices"] = prices
-        if scores:
-            doc["scores"] = [
-                {"code": r["code"], "name": r["name"],
-                 "score": round(r["score"], 4), "price": r["price"]}
-                for r in scores[:20]
-            ]
+        if market_info:
+            doc["market_info"] = market_info
         db.collection("daily").document(today_str).set(doc)
         print(f"  ✅ Firebase /daily/{today_str} 저장 완료")
     except Exception as e:
@@ -365,7 +382,7 @@ def save_to_firebase(today_str: str, signals: list, exits: list,
 
 
 # ═══════════════════════════════════════════════════════════
-#  시장 데이터 수집 (병렬)
+#  시장 데이터 수집
 # ═══════════════════════════════════════════════════════════
 
 def _fetch_one(args):
@@ -378,19 +395,18 @@ def _fetch_one(args):
 
 
 def fetch_all_ohlcv(codes: list, end_date: str,
-                    n_days: int = 310, max_workers: int = 5) -> dict:
+                    n_days: int = 60, max_workers: int = 5) -> dict:
     """200종목 병렬 OHLCV 수집."""
     end_dt    = datetime.datetime.strptime(end_date, "%Y%m%d")
     start_dt  = end_dt - datetime.timedelta(days=int(n_days * 1.8))
     start_str = start_dt.strftime("%Y%m%d")
     args_list = [(c, start_str, end_date, n_days) for c in codes]
     results   = {}
-
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futs = {ex.submit(_fetch_one, a): a[0] for a in args_list}
         done = 0
         for fut in as_completed(futs):
-            code, df   = fut.result()
+            code, df = fut.result()
             results[code] = df
             done += 1
             if done % 40 == 0:
@@ -398,29 +414,56 @@ def fetch_all_ohlcv(codes: list, end_date: str,
     return results
 
 
-def fetch_kospi200_series(end_date: str, n_days: int = 340) -> pd.Series:
-    """KOSPI200 지수 종가 시계열."""
-    end_dt   = datetime.datetime.strptime(end_date, "%Y%m%d")
-    start_dt = end_dt - datetime.timedelta(days=int(n_days * 1.8))
+def get_kospi200_monthly_history(today: datetime.datetime, n_months: int = 8) -> list:
+    """
+    KOSPI200 월별 수익률 계산 (최근 n_months개월).
+    Returns list of {"year":y, "month":m, "r":ret%} — index 0 = 당월, 1 = 전월, ...
+    """
+    today_str = today.strftime("%Y%m%d")
+    start_dt  = today - datetime.timedelta(days=(n_months + 2) * 35)
+    start_str = start_dt.strftime("%Y%m%d")
     try:
-        df = pykrx_stock.get_index_ohlcv_by_date(
-            start_dt.strftime("%Y%m%d"), end_date, "1028"
-        )
-        return df["종가"].tail(n_days).astype(float)
+        df = pykrx_stock.get_index_ohlcv_by_date(start_str, today_str, "1028")
+        if df.empty:
+            return []
+        close = df["종가"].astype(float)
+        close.index = pd.to_datetime(close.index)
+
+        results = []
+        curr_y, curr_m = today.year, today.month
+
+        for i in range(n_months):
+            yr = curr_y
+            mo = curr_m - i
+            while mo <= 0:
+                mo += 12; yr -= 1
+
+            m_start = pd.Timestamp(yr, mo, 1)
+            nxt_yr  = yr + 1 if mo == 12 else yr
+            nxt_mo  = 1      if mo == 12 else mo + 1
+            m_end   = pd.Timestamp(nxt_yr, nxt_mo, 1)
+
+            # 이전 달 마지막 영업일 (기준 종가)
+            pre_yr = yr - 1 if mo == 1 else yr
+            pre_mo = 12     if mo == 1 else mo - 1
+            pre_start = pd.Timestamp(pre_yr, pre_mo, 1)
+
+            month_data = close[(close.index >= m_start) & (close.index < m_end)]
+            prev_data  = close[(close.index >= pre_start) & (close.index < m_start)]
+
+            if len(month_data) >= 1 and not prev_data.empty:
+                ret = (month_data.iloc[-1] / prev_data.iloc[-1] - 1) * 100
+                results.append({"year": yr, "month": mo, "r": float(ret)})
+
+        return results  # [0]=당월, [1]=전월, ...
     except Exception as e:
-        print(f"  ⚠ KOSPI200 조회 실패: {e}")
-        return pd.Series(dtype=float)
+        print(f"  ⚠ KOSPI200 월별 수익률 조회 실패: {e}")
+        return []
 
 
 # ═══════════════════════════════════════════════════════════
-#  피처 엔지니어링
+#  기술 지표 (RSI-2, ADX-14)
 # ═══════════════════════════════════════════════════════════
-
-FEATURE_COLS = [
-    "rsi2", "rsi14", "adx", "vol_z", "cvd_net",
-    "mom5", "mom20", "bb_pct", "kospi_1m",
-]
-
 
 def _rsi_series(close: pd.Series, period: int) -> pd.Series:
     delta = close.diff()
@@ -443,230 +486,188 @@ def _adx_series(df: pd.DataFrame, period: int = 14) -> pd.Series:
     return dx.ewm(span=period, adjust=False).mean()
 
 
-def engineer_features_df(df: pd.DataFrame, kospi_1m_map: pd.Series) -> pd.DataFrame:
-    """단일 종목 전체 히스토리 → 피처 DataFrame (벡터화)."""
-    close = df["종가"].astype(float)
-    high  = df["고가"].astype(float)
-    low   = df["저가"].astype(float)
-    open_ = df["시가"].astype(float)
-    vol   = df["거래량"].astype(float)
-
-    feat = pd.DataFrame(index=df.index)
-    feat["rsi2"]    = _rsi_series(close, 2)
-    feat["rsi14"]   = _rsi_series(close, 14)
-    feat["adx"]     = _adx_series(df, 14)
-
-    vm = vol.rolling(21).mean().shift(1)
-    vs = vol.rolling(21).std().shift(1)
-    feat["vol_z"]   = (vol - vm) / (vs + 1e-9)
-
-    direction       = (close > open_).astype(float) - (close < open_).astype(float)
-    feat["cvd_net"] = direction.rolling(14).sum()
-
-    feat["mom5"]    = close.pct_change(5)  * 100
-    feat["mom20"]   = close.pct_change(20) * 100
-
-    sma20 = close.rolling(20).mean()
-    std20 = close.rolling(20).std()
-    feat["bb_pct"]  = (close - (sma20 - 2 * std20)) / (4 * std20 + 1e-9)
-
-    feat["kospi_1m"] = kospi_1m_map.reindex(feat.index).ffill().fillna(0.0)
-    return feat
-
-
 # ═══════════════════════════════════════════════════════════
-#  XGBoost 학습 + 전종목 스코어링
-# ═══════════════════════════════════════════════════════════
-
-def train_xgb_model(all_dfs: dict, kospi_1m_map: pd.Series):
-    """
-    200종목 과거 데이터 → XGBoost 학습.
-    레이블: 5일 후 종가 > 오늘 종가.
-    lookahead 방지: feature[t] / label[t+5], 마지막 5행 제거.
-    """
-    import xgboost as xgb
-
-    X_list, y_list = [], []
-    for code, df in all_dfs.items():
-        if df.empty or len(df) < 60:
-            continue
-        try:
-            feat = engineer_features_df(df, kospi_1m_map)
-            future_ret = df["종가"].astype(float).shift(-5) / df["종가"].astype(float) - 1
-            y = (future_ret > 0.0).astype(int)
-            combined = feat.copy()
-            combined["__y"] = y
-            combined = combined.dropna().iloc[:-5]   # 마지막 5행 제거
-            if len(combined) < 20:
-                continue
-            X_list.append(combined[FEATURE_COLS])
-            y_list.append(combined["__y"])
-        except Exception:
-            continue
-
-    if not X_list:
-        print("  ⚠ 학습 데이터 없음")
-        return None
-
-    X = pd.concat(X_list, ignore_index=True)
-    y = pd.concat(y_list, ignore_index=True)
-
-    pos_ratio  = float(y.mean())
-    scale_pos  = (1 - pos_ratio) / (pos_ratio + 1e-9)
-
-    model = xgb.XGBClassifier(
-        n_estimators=200,
-        max_depth=4,
-        learning_rate=0.05,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        min_child_weight=5,
-        gamma=1,
-        scale_pos_weight=scale_pos,
-        eval_metric="logloss",
-        random_state=42,
-        verbosity=0,
-        n_jobs=-1,
-    )
-    model.fit(X, y)
-
-    imp = pd.Series(model.feature_importances_, index=FEATURE_COLS).sort_values(ascending=False)
-    print(f"  ✅ XGBoost 학습: {len(X):,}샘플  클래스비={pos_ratio:.1%}")
-    print(f"  📊 피처 중요도: " + "  ".join(f"{k}={v:.3f}" for k, v in imp.items()))
-    return model
-
-
-def score_all_stocks(model, all_dfs: dict, kospi_1m_map: pd.Series) -> list:
-    """전종목 오늘(최신행) XGBoost 스코어 계산 → 내림차순 정렬."""
-    rows = []
-    name_map = {code: name for name, code in GDB_STOCK_POOL}
-    for code, df in all_dfs.items():
-        if df.empty or len(df) < 30:
-            continue
-        try:
-            feat = engineer_features_df(df, kospi_1m_map)
-            today_feat = feat[FEATURE_COLS].iloc[-1]
-            if today_feat.isna().any():
-                continue
-            score = float(model.predict_proba([today_feat.values])[0][1])
-            rows.append({
-                "score":  score,
-                "code":   code,
-                "name":   name_map.get(code, code),
-                "price":  float(df["종가"].iloc[-1]),
-                "rsi2":   round(float(feat["rsi2"].iloc[-1]),  1),
-                "rsi14":  round(float(feat["rsi14"].iloc[-1]), 1),
-                "adx":    round(float(feat["adx"].iloc[-1]),   1),
-                "vol_z":  round(float(feat["vol_z"].iloc[-1]), 2),
-                "cvd":    int(feat["cvd_net"].iloc[-1]),
-                "mom5":   round(float(feat["mom5"].iloc[-1]),  1),
-            })
-        except Exception:
-            continue
-
-    rows.sort(key=lambda x: x["score"], reverse=True)
-    return rows
-
-
-# ═══════════════════════════════════════════════════════════
-#  신호 생성
+#  신호 생성 — 안 A (백테스팅 로직 완전 이식)
 # ═══════════════════════════════════════════════════════════
 
 def get_real_signals(today: datetime.datetime):
+    """
+    백테스팅(backtest.js runBacktest)과 동일한 판단 로직 실전 적용.
+    Returns: (signals, exits, signal_date, prices, is_fallback, market_info)
+    """
     today_str = today.strftime("%Y%m%d")
-    t1 = today - datetime.timedelta(days=1)
+    p = PARAMS
+
+    # ── sigThresh 계산 (backtest.js와 완전 동일)
+    sig_thresh_base = max(0.8, (p["adx"] - 20) * 0.15)
+    sig_thresh      = sig_thresh_base * max(0.6, p["zscore"] * 0.35)
+
+    print(f"  📐 sigThresh = max(0.8, ({p['adx']}-20)×0.15)×max(0.6, {p['zscore']}×0.35)"
+          f" = {sig_thresh_base:.3f}×{max(0.6, p['zscore']*0.35):.3f} = {sig_thresh:.3f}")
+
+    # ── KOSPI200 월별 데이터
+    print("  📈 KOSPI200 월별 수익률 계산 중...")
+    monthly_hist = get_kospi200_monthly_history(today, n_months=8)
+
+    market_info = {"sig_thresh": round(sig_thresh, 3)}
+
+    if len(monthly_hist) < 1:
+        print("  ⚠ KOSPI200 데이터 수집 실패 → 신호 없음")
+        market_info["blocked"] = "KOSPI200 데이터 없음"
+        return [], [], today_str, {}, False, market_info
+
+    curr = monthly_hist[0]  # 당월
+    prev = monthly_hist[1] if len(monthly_hist) > 1 else {"r": 0.0, "year": 0, "month": 0}
+    abs_r = abs(curr["r"])
+
+    market_info["curr_ret"]  = round(curr["r"], 2)
+    market_info["prev_ret"]  = round(prev["r"], 2)
+
+    print(f"  📊 당월 KOSPI200: {curr['r']:+.2f}%  전월: {prev['r']:+.2f}%  "
+          f"|당월| = {abs_r:.2f}  sigThresh = {sig_thresh:.3f}")
+
+    # ── L0: 시장 모멘텀 필터 (backtest: absR < sigThresh → return)
+    if abs_r < sig_thresh:
+        reason = f"|{abs_r:.2f}%| < sigThresh {sig_thresh:.3f}"
+        print(f"  ⛔ L0 차단: {reason} → 매수 신호 없음")
+        market_info["blocked"] = f"L0: {reason}"
+        return [], [], today_str, {}, False, market_info
+
+    # ── L1: 하락장 + 전월 약세 (backtest: m.r < -1 && sentScore < finBertThresh)
+    if curr["r"] < -1:
+        sent_score = prev["r"] / 15
+        if sent_score < p["finBertThresh"]:
+            reason = (f"하락장({curr['r']:+.2f}%) AND "
+                      f"전월 sentScore={sent_score:.3f} < {p['finBertThresh']}")
+            print(f"  ⛔ L1 차단: {reason}")
+            market_info["blocked"] = f"L1: {reason}"
+            return [], [], today_str, {}, False, market_info
+
+    # ── L3: CVD 차단 (backtest: netCVD <= cvdGate && m.r < 0)
+    cvd_months = max(1, round(p["cvdWin"] / 15))
+    cvd_slice  = monthly_hist[1 : 1 + cvd_months]  # 전월부터 N개월
+    if len(cvd_slice) >= 2:
+        net_cvd  = sum(1 if m["r"] > 0 else -1 for m in cvd_slice)
+        cvd_gate = -int(p["cvdCompare"] / 2)
+        market_info["net_cvd"] = net_cvd
+        if net_cvd <= cvd_gate and curr["r"] < 0:
+            reason = f"netCVD={net_cvd} ≤ cvdGate={cvd_gate} AND 하락장"
+            print(f"  ⛔ L3 차단: {reason}")
+            market_info["blocked"] = f"L3: {reason}"
+            return [], [], today_str, {}, False, market_info
+
+    # ── 약한 모멘텀: |absR| < sigThresh*2 → 슬롯 절반 (backtest: seed%2==0 continue)
+    weak_market    = abs_r < sig_thresh * 2
+    effective_slots = max(1, p["nSlots"] // 2) if weak_market else p["nSlots"]
+    if weak_market:
+        print(f"  ⚠ 약한 모멘텀 ({abs_r:.2f}% < {sig_thresh*2:.2f}) "
+              f"→ 유효 슬롯 {p['nSlots']} → {effective_slots}")
+    market_info["weak_market"]     = weak_market
+    market_info["effective_slots"] = effective_slots
+
+    # ── 종목 OHLCV 수집 (RSI-2 ≥ 14일치 필요 → 60봉)
+    codes = [code for _, code in GDB_STOCK_POOL]
+    print(f"  📡 200종목 OHLCV 수집 중 ({today_str})...")
+    t0      = time.time()
+    all_dfs = fetch_all_ohlcv(codes, today_str, n_days=60)
+
+    # T-1 fallback
+    t1         = today - datetime.timedelta(days=1)
     while t1.weekday() >= 5:
         t1 -= datetime.timedelta(days=1)
-    t1_str = t1.strftime("%Y%m%d")
-
-    codes = [code for _, code in GDB_STOCK_POOL]
-
-    # ── 데이터 수집
-    print(f"  📡 200종목 OHLCV 수집 중 (T-0: {today_str})...")
-    t0      = time.time()
-    all_dfs = fetch_all_ohlcv(codes, today_str, n_days=310)
-
-    # T-0 실패 종목 → T-1 fallback
+    t1_str     = t1.strftime("%Y%m%d")
     fallback_names = []
     for name, code in GDB_STOCK_POOL:
         df = all_dfs.get(code, pd.DataFrame())
-        if df.empty or len(df) < 5:
+        if df.empty or len(df) < 10:
             _, df_fb = _fetch_one((code,
                                    (datetime.datetime.strptime(t1_str, "%Y%m%d")
-                                    - datetime.timedelta(days=560)).strftime("%Y%m%d"),
-                                   t1_str, 310))
+                                    - datetime.timedelta(days=120)).strftime("%Y%m%d"),
+                                   t1_str, 60))
             if not df_fb.empty:
                 all_dfs[code] = df_fb
                 fallback_names.append(name)
 
-    valid = sum(1 for df in all_dfs.values() if not df.empty and len(df) >= 30)
+    valid = sum(1 for df in all_dfs.values() if not df.empty and len(df) >= 15)
     print(f"  ✅ 수집 완료: {valid}/200 유효  ({time.time()-t0:.0f}초)")
 
-    # ── KOSPI200 시계열
-    print("  📈 KOSPI200 지수 수집...")
-    kospi_ser = fetch_kospi200_series(today_str, n_days=340)
-    # 1개월 수익률 시계열 생성 (전 종목 인덱스 합집합 기준)
-    all_idx = pd.DatetimeIndex([])
-    for df in all_dfs.values():
-        if not df.empty:
-            all_idx = all_idx.union(df.index)
-    if not kospi_ser.empty:
-        k1m_raw      = kospi_ser.pct_change(22) * 100
-        kospi_1m_map = k1m_raw.reindex(k1m_raw.index.union(all_idx)).ffill().reindex(all_idx).fillna(0.0)
-    else:
-        kospi_1m_map = pd.Series(0.0, index=all_idx)
+    # ── RSI-2 + ADX 스크리닝 (backtest: RSI-2 기반 진입 / ADX 추세 확인)
+    name_map   = {code: name for name, code in GDB_STOCK_POOL}
+    candidates = []
 
-    # ── XGBoost 학습
-    print("  🤖 XGBoost 학습 중...")
-    t_train = time.time()
-    model   = train_xgb_model(all_dfs, kospi_1m_map)
-    print(f"  ✅ 학습 완료 ({time.time()-t_train:.0f}초)")
+    for code, df in all_dfs.items():
+        if df.empty or len(df) < 15:
+            continue
+        try:
+            close = df["종가"].astype(float)
+            rsi2  = float(_rsi_series(close, 2).iloc[-1])
+            rsi14 = float(_rsi_series(close, 14).iloc[-1])
+            adx   = float(_adx_series(df, 14).iloc[-1])
+            vol   = df["거래량"].astype(float)
+            vm    = vol.rolling(21).mean().shift(1)
+            vs    = vol.rolling(21).std().shift(1)
+            vol_z = float(((vol - vm) / (vs + 1e-9)).iloc[-1])
+            price = float(close.iloc[-1])
 
-    if model is None:
-        return [], [], today_str, {}, False, []
+            if pd.isna(rsi2) or pd.isna(adx):
+                continue
 
-    # ── 전종목 스코어링 + 랭킹
-    print("  🎯 전종목 스코어링...")
-    scores = score_all_stocks(model, all_dfs, kospi_1m_map)
-    prices = {r["code"]: r["price"] for r in scores}
+            candidates.append({
+                "code":  code,
+                "name":  name_map.get(code, code),
+                "rsi2":  round(rsi2, 1),
+                "rsi14": round(rsi14, 1),
+                "adx":   round(adx, 1),
+                "vol_z": round(vol_z, 2),
+                "price": price,
+            })
+        except Exception:
+            continue
 
-    # Top20 로그
-    print("\n  ── XGBoost 랭킹 (상위 20위) ─────────────────────────")
-    for i, r in enumerate(scores[:20]):
-        star = "★" if i < PARAMS["nSlots"] and r["score"] >= PARAMS["mlThresh"] / 100 else " "
-        print(f"  {star}#{i+1:2d}  {r['name'][:10]:10s}  "
-              f"score={r['score']:.3f}  RSI2={r['rsi2']:5.1f}  "
-              f"ADX={r['adx']:5.1f}  VolZ={r['vol_z']:+.2f}  Mom5={r['mom5']:+.1f}%")
+    # ── 조건 필터: RSI-2 ≤ rsi2Entry AND ADX ≥ adx
+    filtered = [c for c in candidates
+                if c["rsi2"] <= p["rsi2Entry"] and c["adx"] >= p["adx"]]
+
+    # RSI-2 오름차순 (가장 과매도 → 슬롯1)
+    filtered.sort(key=lambda x: x["rsi2"])
+
+    print(f"\n  ── 스크리닝 결과 ─────────────────────────────────────")
+    print(f"  유효 종목: {len(candidates)}개  "
+          f"RSI-2≤{p['rsi2Entry']} AND ADX≥{p['adx']}: {len(filtered)}개")
+    for i, c in enumerate(filtered[:15]):
+        star = "★" if i < effective_slots else " "
+        print(f"  {star}#{i+1:2d}  {c['name'][:10]:10s}  "
+              f"RSI-2={c['rsi2']:5.1f}  ADX={c['adx']:5.1f}  VolZ={c['vol_z']:+.2f}")
+    if not filtered:
+        print("  (조건 미달 종목 없음)")
     print("  ─────────────────────────────────────────────────────\n")
 
-    # ── 매수 신호: 상위 nSlots + score ≥ mlThresh/100
-    min_score = PARAMS["mlThresh"] / 100
-    signals   = []
-    for slot_idx, row in enumerate(scores[:PARAMS["nSlots"]], start=1):
-        if row["score"] < min_score:
-            print(f"  ⚠ #{slot_idx} {row['name']} score={row['score']:.3f} "
-                  f"< threshold={min_score:.2f} → 임계점 미달 스킵")
-            continue
-        qty = int(CAPITAL_PER_SLOT / row["price"]) if row["price"] > 0 else 0
+    market_info["n_candidates"]    = len(candidates)
+    market_info["n_filtered"]      = len(filtered)
+
+    # ── 매수 신호 (상위 effective_slots)
+    prices  = {c["code"]: c["price"] for c in candidates}
+    signals = []
+    for slot_idx, cand in enumerate(filtered[:effective_slots], start=1):
+        qty = int(CAPITAL_PER_SLOT / cand["price"]) if cand["price"] > 0 else 0
         signals.append({
-            "name":  row["name"],
-            "code":  row["code"],
+            "name":  cand["name"],
+            "code":  cand["code"],
             "slot":  slot_idx,
-            "price": row["price"],
+            "price": cand["price"],
             "qty":   qty,
-            "score": row["score"],
-            "rsi2":  row["rsi2"],
-            "adx":   row["adx"],
-            "vol_z": row["vol_z"],
-            "cvd":   row["cvd"],
+            "rsi2":  cand["rsi2"],
+            "rsi14": cand["rsi14"],
+            "adx":   cand["adx"],
+            "vol_z": cand["vol_z"],
             "rank":  slot_idx,
         })
 
-    # ── 청산 후보: 보유 종목 RSI-2 ≥ rsi2Exit
+    # ── 청산 후보: RSI-2 ≥ rsi2Exit
     exits = [
-        {"name": r["name"], "code": r["code"],
-         "rsi2": r["rsi2"], "exit": f"RSI-2≥{PARAMS['rsi2Exit']}"}
-        for r in scores if r["rsi2"] >= PARAMS["rsi2Exit"]
+        {"name": c["name"], "code": c["code"],
+         "rsi2": c["rsi2"], "exit": f"RSI-2≥{p['rsi2Exit']}"}
+        for c in candidates if c["rsi2"] >= p["rsi2Exit"]
     ]
 
     if fallback_names:
@@ -674,7 +675,7 @@ def get_real_signals(today: datetime.datetime):
               + ", ".join(fallback_names[:5])
               + (f" 외 {len(fallback_names)-5}종목" if len(fallback_names) > 5 else ""))
 
-    return signals, exits, today_str, prices, bool(fallback_names), scores
+    return signals, exits, today_str, prices, bool(fallback_names), market_info
 
 
 # ═══════════════════════════════════════════════════════════
@@ -683,19 +684,44 @@ def get_real_signals(today: datetime.datetime):
 
 def build_message(today, signals, exits, signal_date,
                   kpi_data=None, is_fallback=False,
-                  holdings: set = None, scores: list = None):
+                  holdings: set = None, market_info: dict = None):
     date_str = today.strftime("%Y-%m-%d")
     time_str = today.strftime("%H:%M")
     kpi_map  = kpi_data or KPI_FALLBACK
-    min_score = PARAMS["mlThresh"] / 100
+    p        = PARAMS
+    mi       = market_info or {}
+
+    sig_thresh   = mi.get("sig_thresh", 0)
+    curr_ret     = mi.get("curr_ret", 0)
+    prev_ret     = mi.get("prev_ret", 0)
+    blocked      = mi.get("blocked", "")
+    weak_market  = mi.get("weak_market", False)
+    eff_slots    = mi.get("effective_slots", p["nSlots"])
+    n_filtered   = mi.get("n_filtered", 0)
 
     lines = [
         f"📊 <b>SmartSwing-NH</b>  <code>{date_str}  {time_str}</code>",
-        f"<i>🤖 Engine: XGBoost v2  |  KOSPI200 200종목 스코어링</i>",
+        f"<i>🔁 Engine: 백테스팅 동일로직 v3  |  KOSPI200 시장타이밍 + RSI-2/ADX 스크리닝</i>",
         f"<i>기준: T-0 현재가 ({signal_date})"
         + (" ⚠ 일부 T-1 fallback" if is_fallback else "") + "</i>",
         "",
     ]
+
+    # 시장 타이밍 상태
+    lines.append("<b>[ 시장 타이밍 ]</b>")
+    lines.append(
+        f"당월 KOSPI200: <code>{curr_ret:+.2f}%</code>  "
+        f"전월: <code>{prev_ret:+.2f}%</code>  "
+        f"sigThresh: <code>{sig_thresh:.3f}</code>"
+    )
+    if blocked:
+        lines.append(f"⛔ 차단: {blocked}")
+    elif weak_market:
+        lines.append(f"⚠ 약한 모멘텀 → 유효 슬롯 {eff_slots}개")
+    else:
+        lines.append(f"✅ 진입 조건 충족 (유효 슬롯 {eff_slots}개)")
+    lines.append(f"<code>후보 종목: RSI-2≤{p['rsi2Entry']} AND ADX≥{p['adx']} → {n_filtered}개</code>")
+    lines.append("")
 
     # 매수 신호
     lines.append("<b>[ 오늘 매수 신호 ]</b>")
@@ -705,25 +731,16 @@ def build_message(today, signals, exits, signal_date,
                 f"▲ 슬롯{s['slot']}  {s['name']}({s['code']})\n"
                 f"   ₩{s['price']:,.0f}  ×  {s['qty']}주  "
                 f"= ₩{s['price'] * s['qty']:,.0f}\n"
-                f"   🎯 XGB={s['score']:.3f}  RSI-2={s['rsi2']}  "
-                f"ADX={s['adx']}  VolZ={s['vol_z']:+.2f}"
+                f"   RSI-2={s['rsi2']}  ADX={s['adx']}  VolZ={s['vol_z']:+.2f}"
             )
     else:
-        lines.append(f"─ 매수 신호 없음 (임계점 {min_score:.2f} 미달)")
+        if blocked:
+            lines.append("─ 시장 타이밍 필터 차단 → 매수 없음")
+        elif n_filtered == 0:
+            lines.append(f"─ 조건 만족 종목 없음 (RSI-2≤{p['rsi2Entry']} AND ADX≥{p['adx']})")
+        else:
+            lines.append("─ 매수 신호 없음")
     lines.append("")
-
-    # Top10 스코어 표
-    if scores and len(scores) >= 5:
-        lines.append("<b>[ XGBoost Top 10 ]</b>")
-        for i, r in enumerate(scores[:10], 1):
-            filled = "█" * int(r["score"] * 10)
-            empty  = "░" * (10 - int(r["score"] * 10))
-            mark   = "▲" if any(s["code"] == r["code"] for s in signals) else " "
-            lines.append(
-                f"<code>{mark}#{i:2d} {r['name'][:8]:8s} "
-                f"{filled}{empty} {r['score']:.3f} RSI2={r['rsi2']:4.0f}</code>"
-            )
-        lines.append("")
 
     # 청산 후보
     held_exits  = [e for e in exits if holdings and e["code"] in holdings]
@@ -739,7 +756,7 @@ def build_message(today, signals, exits, signal_date,
 
     if other_exits:
         names = ", ".join(e["name"] for e in other_exits[:5])
-        lines.append(f"<i>ℹ 미보유 RSI≥{PARAMS['rsi2Exit']} (참고): {names}</i>")
+        lines.append(f"<i>ℹ 미보유 RSI≥{p['rsi2Exit']} (참고): {names}</i>")
         lines.append("")
 
     # KPI
@@ -748,10 +765,10 @@ def build_message(today, signals, exits, signal_date,
     lines.append(f"+{kpi['totalRet']}%  연환산 +{kpi['annRet']}%  MDD {kpi['mdd']}%")
     lines.append("")
 
-    p = PARAMS
     lines.append(
-        f"⚙️ <code>nSlots={p['nSlots']}  mlThresh={p['mlThresh']}  "
-        f"청산≥{p['rsi2Exit']}  HS={p['hardStop']}%  TS={p['trailing']}%</code>"
+        f"⚙️ <code>adx≥{p['adx']}  rsi2Entry≤{p['rsi2Entry']}  "
+        f"z={p['zscore']}  nSlots={p['nSlots']}  "
+        f"HS={p['hardStop']}%  TS={p['trailing']}%</code>"
     )
     return "\n".join(lines)
 
@@ -803,7 +820,7 @@ def is_trading_day(dt):
 
 def main():
     today = get_today_kst()
-    print(f"[{today.isoformat()}] SmartSwing-NH XGBoost v2 실행")
+    print(f"[{today.isoformat()}] SmartSwing-NH 백테스팅 동일로직 v3 실행")
 
     force = bool(os.environ.get("FORCE_RUN"))
     if not is_trading_day(today) and not force:
@@ -816,12 +833,12 @@ def main():
     kpi_data = load_kpi_from_firebase()
     holdings = load_holdings_from_firebase()
 
-    t_total  = time.time()
-    signals, exits, signal_date, prices, is_fallback, scores = get_real_signals(today)
+    t_total = time.time()
+    signals, exits, signal_date, prices, is_fallback, market_info = get_real_signals(today)
     print(f"\n⏱ 총 소요: {time.time()-t_total:.0f}초")
 
     msg = build_message(today, signals, exits, signal_date,
-                        kpi_data, is_fallback, holdings, scores)
+                        kpi_data, is_fallback, holdings, market_info)
     print("─── 전송 메시지 ───")
     print(msg)
     print("──────────────────")
@@ -833,7 +850,7 @@ def main():
         print(f"❌ 전송 실패: {result}")
 
     today_str = today.strftime("%Y%m%d")
-    save_to_firebase(today_str, signals, exits, signal_date, prices, is_fallback, scores)
+    save_to_firebase(today_str, signals, exits, signal_date, prices, is_fallback, market_info)
     check_pat_expiry_alert(today)
 
 

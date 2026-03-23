@@ -345,36 +345,80 @@ export const heatColor = (v) => {
 // GDB_LAST_DATE = "26-03" 이후 UDB 문서를 기존 배열에 append
 // ════════════════════════════════════════════════════════════
 
-/** Firebase /udb 컬렉션 문서 배열을 ALL_MONTHLY에 merge (GDB 이후 신규 달만) */
+/** Firebase /udb 컬렉션 문서 배열을 ALL_MONTHLY에 merge
+ *  ★ GDB_LAST 이상(>=) UDB 데이터는 GDB 고정값을 override — 당월 실시간 반영
+ */
 export function buildLiveMonthly(udbDocs = []) {
   const GDB_LAST = "26-03";
+
+  // UDB에서 GDB_LAST 이상인 달을 map으로 수집 (26-03 포함)
+  const udbMap = {};
+  udbDocs
+    .filter(u => u.date && u.date >= GDB_LAST)
+    .forEach(u => { udbMap[u.date] = u; });
+
+  // GDB_LAST 미만은 GDB 그대로 유지
+  const base = ALL_MONTHLY.filter(m => m.date < GDB_LAST);
+
+  // GDB_LAST 이상은 UDB 실시간값으로 대체 (없으면 GDB 유지)
+  const gdbTail = ALL_MONTHLY.filter(m => m.date >= GDB_LAST);
+  const liveTail = gdbTail.map(g => {
+    const u = udbMap[g.date];
+    if (!u) return g;  // UDB 없으면 GDB 유지
+    return { date: u.date, label: u.label || g.label, m: u.m || g.m,
+             year: u.year, month: u.month, r: u.r ?? g.r };
+  });
+
+  // GDB_LAST 초과 신규 달 추가
   const newRows = udbDocs
-    .filter(u => u.date && u.date > GDB_LAST)
+    .filter(u => u.date && u.date > GDB_LAST && !gdbTail.find(g => g.date === u.date))
     .sort((a, b) => a.date.localeCompare(b.date))
     .map(u => ({
-      date:  u.date,
-      label: u.label  || `20${u.date.replace("-", "-")}`,
-      m:     u.m      || `${u.month}월`,
-      year:  u.year,
-      month: u.month,
-      r:     u.r ?? 0,
+      date: u.date, label: u.label || `20${u.date}`, m: u.m || `${u.month}월`,
+      year: u.year, month: u.month, r: u.r ?? 0,
     }));
-  return [...ALL_MONTHLY, ...newRows];
+
+  return [...base, ...liveTail, ...newRows];
 }
 
-/** Firebase /udb 문서 배열로 EQUITY_CURVE_RAW 연장 */
+/** Firebase /udb 문서 배열로 EQUITY_CURVE_RAW 연장
+ *  ★ GDB_LAST 포함(>=) UDB는 GDB 마지막 포인트를 실시간값으로 override
+ */
 export function buildLiveEquityCurve(udbDocs = []) {
   const GDB_LAST = "26-03";
+
+  // GDB_LAST 이상인 UDB를 map으로
+  const udbMap = {};
+  udbDocs
+    .filter(u => u.date && u.date >= GDB_LAST)
+    .forEach(u => { udbMap[u.date] = u; });
+
+  // GDB_LAST 미만은 그대로
+  const base = EQUITY_CURVE_RAW.filter(p => p.d < GDB_LAST);
+  const prevK = base.length > 0 ? base[base.length - 1].k : EQUITY_CURVE_RAW[0].k;
+
+  // GDB_LAST 이상 포인트를 UDB 실시간값으로 재계산
+  const gdbTail = EQUITY_CURVE_RAW.filter(p => p.d >= GDB_LAST);
+  let runningK = prevK;
+  const liveTail = gdbTail.map(g => {
+    const u = udbMap[g.d];
+    const r = u?.r ?? (g.k / (base.length > 0 ? base[base.length-1].k : 100) - 1) * 100;
+    const newK = u ? +(runningK * (1 + (u.r ?? 0) / 100)).toFixed(2) : g.k;
+    runningK = newK;
+    return { d: g.d, k: newK };
+  });
+
+  // GDB_LAST 초과 신규 달
   const sorted = udbDocs
-    .filter(u => u.date && u.date > GDB_LAST)
+    .filter(u => u.date && u.date > GDB_LAST && !gdbTail.find(g => g.d === u.date))
     .sort((a, b) => a.date.localeCompare(b.date));
-  let prevK = EQUITY_CURVE_RAW[EQUITY_CURVE_RAW.length - 1].k;
   const extended = sorted.map(u => {
-    const newK = +(prevK * (1 + (u.r ?? 0) / 100)).toFixed(2);
-    prevK = newK;
+    const newK = +(runningK * (1 + (u.r ?? 0) / 100)).toFixed(2);
+    runningK = newK;
     return { d: u.date, k: newK };
   });
-  return [...EQUITY_CURVE_RAW, ...extended];
+
+  return [...base, ...liveTail, ...extended];
 }
 
 /** Firebase /udb 문서 배열로 STOCK_ATR 연장 */
