@@ -89,7 +89,9 @@ def load_kpi_from_firebase():
 CAPITAL_PER_SLOT = 10_000_000   # 슬롯당 1천만원
 
 # ─────────────────────────────────────────────
-#  전략 파라미터 (Tab3 기본값과 동일)
+#  전략 파라미터 — Fallback 기본값
+#  (Firebase /config/params 미설정 시 사용)
+#  실제 적용 파라미터는 main()에서 load_params_from_firebase()로 덮어씀
 # ─────────────────────────────────────────────
 PARAMS = {
     "adxMin":     30,    # ADX 최소값 (추세 필터)
@@ -98,6 +100,46 @@ PARAMS = {
     "hardStop":   3.5,   # 하드스탑 (%)
     "trailing":   4.0,   # 트레일링 스탑 (%)
 }
+
+def load_params_from_firebase() -> dict:
+    """
+    Firebase /config/params 에서 사용자 설정 파라미터 로드.
+    프론트엔드 '기본값변경' 버튼 클릭 시 저장된 값을 읽어 신호 생성에 적용.
+    로드 실패 또는 미설정 시 하드코딩 PARAMS(기본값) 반환.
+    """
+    defaults = dict(PARAMS)
+    cred_json = os.environ.get("FIREBASE_CREDENTIALS")
+    if not cred_json:
+        print("  ℹ FIREBASE_CREDENTIALS 없음 — 기본 PARAMS 사용")
+        return defaults
+    try:
+        import firebase_admin
+        from firebase_admin import credentials as fb_cred, firestore as fb_fs
+        if not firebase_admin._apps:
+            cred = fb_cred.Certificate(json.loads(cred_json))
+            firebase_admin.initialize_app(cred)
+        fs = fb_fs.client()
+        snap = fs.collection("config").document("params").get()
+        if snap.exists:
+            d = snap.to_dict()
+            loaded = {
+                # 프론트엔드 키(adx) → telegram 키(adxMin) 매핑
+                "adxMin":    float(d.get("adx",       defaults["adxMin"])),
+                "rsi2Entry": float(d.get("rsi2Entry",  defaults["rsi2Entry"])),
+                "rsi2Exit":  float(d.get("rsi2Exit",   defaults["rsi2Exit"])),
+                "hardStop":  float(d.get("hardStop",   defaults["hardStop"])),
+                "trailing":  float(d.get("trailing",   defaults["trailing"])),
+            }
+            updated = d.get("updatedAt", "unknown")
+            print(f"  ✅ Firebase PARAMS 로드: ADX≥{loaded['adxMin']} RSI진입≤{loaded['rsi2Entry']} "
+                  f"청산≥{loaded['rsi2Exit']} HS={loaded['hardStop']}% TS={loaded['trailing']}% "
+                  f"(기본값변경 시각: {updated})")
+            return loaded
+        else:
+            print("  ℹ Firebase /config/params 미설정 — 기본값 PARAMS 사용")
+    except Exception as e:
+        print(f"  ⚠ PARAMS Firebase 로드 실패 (기본값 사용): {e}")
+    return defaults
 
 # ─────────────────────────────────────────────
 #  종목 풀 (GDB와 동일한 12종목, 슬롯 배분)
@@ -452,6 +494,10 @@ def main():
     if not is_trading_day(today) and not force:
         print("주말 — 알림 건너뜀")
         return
+
+    # ── 사용자 설정 PARAMS 로드 (프론트엔드 '기본값변경' 버튼 → Firebase /config/params)
+    global PARAMS
+    PARAMS = load_params_from_firebase()
 
     # Firebase에서 최신 전략 KPI + 보유 종목 로드
     print("🔥 Firebase 로드 중...")

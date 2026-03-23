@@ -6,6 +6,8 @@ import React, { useState } from "react";
 import {
   DEFAULT_PARAMS, CAPITAL_PER_SLOT, krw,
 } from "../backtest.js";
+import { db } from "../firebase.js";
+import { doc, setDoc } from "firebase/firestore";
 
 // ── ParamSlider 컴포넌트 (Tab3 외부 정의 — React 안티패턴 방지)
 function ParamSlider({ label, val, min, max, step, unit, note, reason, locked, pk, setParams }) {
@@ -96,8 +98,37 @@ export default function TabStrategy({ params, setParams, setTab, period, validat
   };
 
   // ── 기본값변경: 현재 params를 "사용자 기본값"으로 등록
-  const handleSetDefault = () => {
+  //   1) localStorage → 복원 버튼의 기준값
+  //   2) Firebase /config/params → telegram_alert.py가 다음 15:00 실행 시 이 값으로 신호 생성
+  const handleSetDefault = async () => {
+    // ① localStorage 저장 (복원 기준)
     try { localStorage.setItem("smartswing_user_default", JSON.stringify(params)); } catch(e) {}
+
+    // ② Firebase /config/params 저장 (telegram_alert.py 적용용)
+    try {
+      await setDoc(doc(db, "config", "params"), {
+        // telegram_alert.py PARAMS 키와 매핑
+        adx:        params.adx,        // → adxMin
+        rsi2Entry:  params.rsi2Entry,
+        rsi2Exit:   params.rsi2Exit,
+        hardStop:   params.hardStop,
+        trailing:   params.trailing,
+        // 추가 파라미터 (향후 확장용)
+        mlThresh:   params.mlThresh,
+        zscore:     params.zscore,
+        cvdWin:     params.cvdWin,
+        cvdCompare: params.cvdCompare,
+        nSlots:     params.nSlots,
+        atrMult:    params.atrMult,
+        timeCut:    params.timeCut,
+        timeCutOn:  params.timeCutOn,
+        updatedAt:  new Date().toISOString(),
+      });
+      console.log("✅ Firebase /config/params 저장 완료");
+    } catch(e) {
+      console.warn("⚠ Firebase params 저장 실패 (localStorage는 저장됨):", e);
+    }
+
     setDefaultSaved(true);
     setTimeout(() => setDefaultSaved(false), 2500);
   };
@@ -133,13 +164,20 @@ export default function TabStrategy({ params, setParams, setTab, period, validat
       </div>
 
       {saved && (
-        <div className="px-4 py-2.5 bg-emerald-900/40 border border-emerald-600 rounded-xl text-sm text-emerald-300 flex items-center gap-2">
-          ✅ 설정이 저장되었습니다. <span className="text-[11px] text-emerald-500 ml-1">(프론트엔드 백테스팅 표시 기준 — 텔레그램 신호 발생은 GitHub Actions 내부 PARAMS 별도 관리)</span>
+        <div className="px-4 py-2.5 bg-emerald-900/40 border border-emerald-600 rounded-xl text-sm text-emerald-300 flex items-center gap-2 flex-wrap gap-y-1">
+          ✅ <span className="font-bold">백테스팅 임시 저장 완료</span>
+          <span className="text-[11px] text-emerald-500">
+            이 탭에서 슬라이더 조작용 — 매수/매도 신호에 반영하려면 <span className="text-amber-300 font-bold">🎯 기본값변경</span>을 누르세요
+          </span>
         </div>
       )}
       {defaultSaved && (
-        <div className="px-4 py-2.5 bg-amber-900/40 border border-amber-600 rounded-xl text-sm text-amber-300 flex items-center gap-2">
-          🎯 현재 파라미터가 <span className="font-bold">나만의 기본값</span>으로 등록됐습니다. 이후 🔁 기본값 복원 시 이 설정으로 리셋됩니다.
+        <div className="px-4 py-2.5 bg-amber-900/40 border border-amber-600 rounded-xl text-sm text-amber-300 flex items-center gap-2 flex-wrap gap-y-1">
+          🎯 <span className="font-bold">기본값 변경 완료</span>
+          <span className="text-[11px] text-amber-400">
+            백테스팅 기준 + <span className="font-bold text-white">매수/매도 신호 생성 파라미터</span> 모두 업데이트됨
+            (내일 15:00 실행부터 적용) · 🔁 복원 시 이 값으로 되돌아옴
+          </span>
         </div>
       )}
 
