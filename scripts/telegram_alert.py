@@ -94,11 +94,23 @@ CAPITAL_PER_SLOT = 10_000_000   # 슬롯당 1천만원
 #  실제 적용 파라미터는 main()에서 load_params_from_firebase()로 덮어씀
 # ─────────────────────────────────────────────
 PARAMS = {
-    "adxMin":     30,    # ADX 최소값 (추세 필터)
-    "rsi2Entry":  15,    # RSI-2 진입 (과매도)
-    "rsi2Exit":   99,    # RSI-2 청산 (과매수)
-    "hardStop":   3.5,   # 하드스탑 (%)
-    "trailing":   4.0,   # 트레일링 스탑 (%)
+    # ── L2: Trend & Pullback
+    "adxMin":      20,    # ADX 최소값 (추세 강도)
+    "rsi2Entry":   15,    # RSI-2 진입 임계값 (과매도)
+    # ── L5: Exit
+    "rsi2Exit":    99,    # RSI-2 청산 임계값 (과매수)
+    "hardStop":    5.3,   # 하드스탑 (%)
+    "trailing":    7.6,   # 트레일링 스탑 (%)
+    "timeCutOn":   False, # 타임컷 활성화
+    "timeCut":     10,    # 타임컷 일수
+    # ── L3: Volume Gate
+    "zscore":      1.0,   # 거래량 Z-스코어 임계값
+    "cvdWin":      70,    # CVD 윈도우 (거래일)
+    "cvdCompare":  7,     # CVD gate 비교값
+    # ── L1: Market Shield
+    "finBertThresh": 0.09,  # FinBERT sentiment 대리값 (KOSPI200 전월수익률 / 15)
+    # ── L4: ML Approval
+    "mlThresh":    57,    # ML 승인 임계값 (55~80, 높을수록 엄격)
 }
 
 def load_params_from_firebase() -> dict:
@@ -124,15 +136,26 @@ def load_params_from_firebase() -> dict:
             d = snap.to_dict()
             loaded = {
                 # 프론트엔드 키(adx) → telegram 키(adxMin) 매핑
-                "adxMin":    float(d.get("adx",       defaults["adxMin"])),
-                "rsi2Entry": float(d.get("rsi2Entry",  defaults["rsi2Entry"])),
-                "rsi2Exit":  float(d.get("rsi2Exit",   defaults["rsi2Exit"])),
-                "hardStop":  float(d.get("hardStop",   defaults["hardStop"])),
-                "trailing":  float(d.get("trailing",   defaults["trailing"])),
+                "adxMin":        float(d.get("adx",           defaults["adxMin"])),
+                "rsi2Entry":     float(d.get("rsi2Entry",      defaults["rsi2Entry"])),
+                "rsi2Exit":      float(d.get("rsi2Exit",       defaults["rsi2Exit"])),
+                "hardStop":      float(d.get("hardStop",       defaults["hardStop"])),
+                "trailing":      float(d.get("trailing",       defaults["trailing"])),
+                "timeCutOn":     bool (d.get("timeCutOn",      defaults["timeCutOn"])),
+                "timeCut":       int  (d.get("timeCut",        defaults["timeCut"])),
+                # L3
+                "zscore":        float(d.get("zscore",         defaults["zscore"])),
+                "cvdWin":        int  (d.get("cvdWin",         defaults["cvdWin"])),
+                "cvdCompare":    int  (d.get("cvdCompare",     defaults["cvdCompare"])),
+                # L1
+                "finBertThresh": float(d.get("finBertThresh",  defaults["finBertThresh"])),
+                # L4
+                "mlThresh":      int  (d.get("mlThresh",       defaults["mlThresh"])),
             }
             updated = d.get("updatedAt", "unknown")
             print(f"  ✅ Firebase PARAMS 로드: ADX≥{loaded['adxMin']} RSI진입≤{loaded['rsi2Entry']} "
                   f"청산≥{loaded['rsi2Exit']} HS={loaded['hardStop']}% TS={loaded['trailing']}% "
+                  f"zscore={loaded['zscore']} mlThresh={loaded['mlThresh']} "
                   f"(기본값변경 시각: {updated})")
             return loaded
         else:
@@ -199,6 +222,62 @@ def calc_rsi2(closes: pd.Series) -> float:
     rs = gain / loss
     return round(100 - (100 / (1 + rs)), 2)
 
+def calc_vol_zscore(df: pd.DataFrame, win: int = 20) -> float:
+    """
+    L3 Volume Gate — 거래량 Z-스코어.
+    당일 거래량이 rolling 평균 대비 얼마나 이탈했는지.
+    zscore > params["zscore"] 이면 통과.
+    """
+    if "거래량" not in df.columns or len(df) < win + 2:
+        return 0.0
+    vols = df["거래량"].astype(float)
+    recent = float(vols.iloc[-1])
+    hist   = vols.iloc[-(win + 1):-1]
+    mean   = hist.mean()
+    std    = hist.std()
+    if std == 0 or mean == 0:
+        return 0.0
+    return round((recent - mean) / std, 2)
+
+
+def calc_cvd_net(df: pd.DataFrame, win: int = 14) -> int:
+    """
+    L3 Volume Gate — CVD(누적 거래량 델타) 근사.
+    양봉(종가>시가) = +1, 음봉 = -1 방식으로 net count 합산.
+    backtest 공식: netCVD <= -floor(cvdCompare/2) 이면 차단.
+    """
+    if "시가" not in df.columns or "종가" not in df.columns or len(df) < win:
+        return 0
+    tail = df.tail(win)
+    up   = (tail["종가"] > tail["시가"]).sum()
+    dn   = (tail["종가"] < tail["시가"]).sum()
+    return int(up - dn)
+
+
+def fetch_kospi200_monthly_ret(today_str: str) -> float:
+    """
+    L1 Market Shield — KOSPI200 최근 1개월 수익률.
+    backtest FinBERT proxy: sentScore = prevMonth_ret / 15
+    실패 시 5.0 반환 (중립 → 필터 미적용).
+    """
+    try:
+        end_dt   = datetime.datetime.strptime(today_str, "%Y%m%d")
+        start_dt = end_dt - datetime.timedelta(days=90)
+        df = pykrx_stock.get_index_ohlcv_by_date(
+            start_dt.strftime("%Y%m%d"), today_str, "1028"  # KOSPI200
+        )
+        if df.empty or len(df) < 22:
+            return 5.0
+        recent    = float(df["종가"].iloc[-1])
+        month_ago = float(df["종가"].iloc[-22])
+        if month_ago == 0:
+            return 5.0
+        return round((recent - month_ago) / month_ago * 100, 2)
+    except Exception as e:
+        print(f"  ⚠ KOSPI200 수익률 조회 실패 (L1 패스): {e}")
+        return 5.0   # 실패 시 중립값 → L1 항상 통과
+
+
 def calc_adx(df: pd.DataFrame, period: int = 14) -> float:
     """ADX(14) 계산"""
     if len(df) < period + 2:
@@ -230,15 +309,18 @@ def calc_adx(df: pd.DataFrame, period: int = 14) -> float:
         return 0.0
 
 # ─────────────────────────────────────────────
-#  실제 신호 생성 (T-0 당일 현재가 기준)
+#  실제 신호 생성 (T-0 당일 현재가 기준) — 5-Layer 필터
 # ─────────────────────────────────────────────
 def get_real_signals(today: datetime.datetime):
     """
     T-0(당일) 15:00 현재가 기준 실제 매수/청산 신호 생성.
-    15:00 KST 실행이므로 pykrx에서 당일 실시간 현재가를 수집.
-    당일 데이터 미수신 시 T-1 종가로 자동 fallback.
-    • 매수:    RSI-2 ≤ 15  AND  ADX ≥ 30
-    • 청산후보: RSI-2 ≥ 99
+    백테스팅(backtest.js)과 동일한 5-Layer 필터 완전 적용.
+
+    ▣ L1 Market Shield  — KOSPI200 전월 수익률 기반 sentiment 필터
+    ▣ L2 Trend&Pullback — RSI-2 ≤ rsi2Entry  AND  ADX ≥ adxMin
+    ▣ L3 Volume Gate    — 거래량 Z-Score OR CVD net 방향 확인
+    ▣ L4 ML Approval    — seed 기반 deterministic 확률 필터 (mlThresh)
+    ▣ L5 Exit Strategy  — RSI-2 ≥ rsi2Exit (청산 후보)
     """
     today_str = today.strftime("%Y%m%d")
 
@@ -250,20 +332,34 @@ def get_real_signals(today: datetime.datetime):
 
     print(f"  기준 날짜: {today_str} (T-0 현재가) — fallback: {t1_str}")
 
+    # ── L1: Market Shield — KOSPI200 전월 수익률
+    kospi_1m_ret = fetch_kospi200_monthly_ret(today_str)
+    sent_score   = kospi_1m_ret / 15.0   # backtest 공식과 동일
+    print(f"  L1 Market Shield: KOSPI200 1개월={kospi_1m_ret:+.1f}%  "
+          f"sentScore={sent_score:.3f}  thresh={PARAMS['finBertThresh']}")
+
     signals        = []
     exits          = []
     skipped        = []
-    prices         = {}   # {code: 현재가} — 전 종목 저장, 매도 모달 자동입력용
-    fallback_codes = []   # T-1 fallback 사용된 종목
+    prices         = {}   # {code: 현재가}
+    fallback_codes = []
+    blocked_log    = []   # 레이어별 차단 로그
+
+    # ── L4: ML 파라미터 사전 계산
+    ml_thresh   = int(PARAMS.get("mlThresh", 57))
+    ml_pass_max = max(0, 100 - max(0, ml_thresh - 55))   # backtest 공식
+
+    # ── L3: CVD 파라미터 사전 계산
+    cvd_win_days = max(5, int(PARAMS.get("cvdWin", 70) / 5))   # 70일 → ~14 거래일
+    cvd_gate     = -int(PARAMS.get("cvdCompare", 7) // 2)       # -3
 
     for name, code, slot in STOCK_POOL:
-        # T-0 먼저 시도
-        df = fetch_ohlcv(code, today_str, n_days=60)
+        # ── OHLCV 수집 (T-0 우선, T-1 fallback)
+        df = fetch_ohlcv(code, today_str, n_days=80)
         is_fallback = False
 
         if df.empty or len(df) < 5:
-            # 당일 데이터 미수신 → T-1 fallback
-            df = fetch_ohlcv(code, t1_str, n_days=60)
+            df = fetch_ohlcv(code, t1_str, n_days=80)
             is_fallback = True
             fallback_codes.append(f"{name}({code})")
 
@@ -272,28 +368,103 @@ def get_real_signals(today: datetime.datetime):
             continue
 
         current_price = float(df["종가"].iloc[-1])
-        rsi2          = calc_rsi2(df["종가"])
-        adx           = calc_adx(df)
+        prices[code]  = current_price
 
-        prices[code] = current_price   # 현재가 기록
+        # ── 지표 계산
+        rsi2  = calc_rsi2(df["종가"])
+        adx   = calc_adx(df)
+        vol_z = calc_vol_zscore(df, win=20)
+        cvd   = calc_cvd_net(df, win=cvd_win_days)
 
-        fb_mark = " [T-1 fallback]" if is_fallback else ""
-        print(f"  {name}({code}): 현재가={current_price:,.0f}  RSI-2={rsi2}  ADX={adx}{fb_mark}")
+        fb_mark = " [T-1]" if is_fallback else ""
+        print(f"  {name}({code}): ₩{current_price:,.0f}  "
+              f"RSI2={rsi2}  ADX={adx}  "
+              f"VolZ={vol_z:.2f}  CVD={cvd}{fb_mark}")
 
-        # 매수 신호: 과매도 + 추세 확인
-        if rsi2 <= PARAMS["rsi2Entry"] and adx >= PARAMS["adxMin"]:
-            qty = int(CAPITAL_PER_SLOT / current_price) if current_price > 0 else 0
-            signals.append({
-                "name": name, "code": code, "slot": slot,
-                "price": current_price, "qty": qty,
-                "rsi2": rsi2, "adx": adx,
-            })
-        # 청산 후보: 과매수
-        elif rsi2 >= PARAMS["rsi2Exit"]:
-            exits.append({
-                "name": name, "code": code, "rsi2": rsi2, "exit": "RSI-2≥99",
-            })
+        # ─────────────────────────────────────
+        # L5 Exit: 청산 후보 (보유 종목 대상)
+        # ─────────────────────────────────────
+        if rsi2 >= PARAMS["rsi2Exit"]:
+            exits.append({"name": name, "code": code, "rsi2": rsi2, "exit": f"RSI-2≥{PARAMS['rsi2Exit']}"})
+            continue   # 청산 후보는 매수 판단 스킵
 
+        # ─────────────────────────────────────
+        # L2: Trend & Pullback — RSI-2 + ADX
+        # ─────────────────────────────────────
+        if not (rsi2 <= PARAMS["rsi2Entry"] and adx >= PARAMS["adxMin"]):
+            continue   # L2 미통과 → 로그 없이 스킵 (정상 필터)
+
+        # ─────────────────────────────────────
+        # L1: Market Shield
+        # 당일 종가가 전일보다 하락 AND sentiment 낮으면 차단
+        # backtest: m.r < -1 AND sentScore < finBertThresh
+        # ─────────────────────────────────────
+        l1_pass = True
+        if len(df) >= 2:
+            daily_chg_pct = (df["종가"].iloc[-1] - df["종가"].iloc[-2]) / df["종가"].iloc[-2] * 100
+            if daily_chg_pct < -1.0 and sent_score < PARAMS["finBertThresh"]:
+                l1_pass = False
+                blocked_log.append(
+                    f"  🛡 L1 차단 {name}: 당일{daily_chg_pct:.1f}% "
+                    f"KOSPI sentiment={sent_score:.3f} < {PARAMS['finBertThresh']}"
+                )
+        if not l1_pass:
+            continue
+
+        # ─────────────────────────────────────
+        # L3: Volume Gate — Vol Z-Score OR CVD
+        # 둘 중 하나라도 통과하면 OK (OR 조건)
+        # backtest CVD: netCVD <= cvdGate AND current down → 차단
+        # ─────────────────────────────────────
+        l3_vol_pass = vol_z >= PARAMS.get("zscore", 1.0)
+        # CVD gate: backtest 공식 — netCVD <= cvdGate AND 당일 하락이면 차단
+        if len(df) >= 2:
+            today_down = df["종가"].iloc[-1] < df["종가"].iloc[-2]
+        else:
+            today_down = False
+        l3_cvd_pass = not (cvd <= cvd_gate and today_down)
+
+        if not (l3_vol_pass or l3_cvd_pass):
+            blocked_log.append(
+                f"  📊 L3 차단 {name}: VolZ={vol_z:.2f}<{PARAMS['zscore']}  "
+                f"CVD={cvd}≤{cvd_gate} + 당일하락"
+            )
+            continue
+
+        # ─────────────────────────────────────
+        # L4: ML Approval — seed 기반 확률 필터
+        # backtest: seed = (month*17 + year*31 + i*7 + slot*37) % 100
+        #           if seed > mlPassMax: continue
+        # 일간 버전: today_ordinal + code_hash + slot
+        # ─────────────────────────────────────
+        today_ord  = today.toordinal()
+        code_hash  = int(code) % 100
+        seed       = (today_ord * 13 + code_hash * 7 + slot * 37) % 100
+        l4_pass    = seed <= ml_pass_max
+        if not l4_pass:
+            blocked_log.append(
+                f"  🤖 L4 차단 {name}: seed={seed} > ml_pass_max={ml_pass_max} "
+                f"(mlThresh={ml_thresh})"
+            )
+            continue
+
+        # ─────────────────────────────────────
+        # 전 Layer 통과 → 매수 신호 확정
+        # ─────────────────────────────────────
+        qty = int(CAPITAL_PER_SLOT / current_price) if current_price > 0 else 0
+        signals.append({
+            "name": name, "code": code, "slot": slot,
+            "price": current_price, "qty": qty,
+            "rsi2": rsi2, "adx": adx,
+            "vol_z": vol_z, "cvd": cvd,
+            "l4_seed": seed,
+        })
+        print(f"  ✅ 매수신호 {name}: L1✓ L2✓(RSI2={rsi2}/ADX={adx}) "
+              f"L3✓(VolZ={vol_z:.2f}/CVD={cvd}) L4✓(seed={seed})")
+
+    # 로그
+    if blocked_log:
+        print("\n".join(blocked_log))
     if skipped:
         print(f"  ⚠ 데이터 없음: {', '.join(skipped)}")
     if fallback_codes:
@@ -329,10 +500,12 @@ def build_message(today, signals, exits, signal_date, kpi_data=None,
         for s in signals:
             price_fmt = f"₩{s['price']:,.0f}"
             amt_fmt   = f"₩{s['price'] * s['qty']:,.0f}"
+            vol_info  = f"VolZ={s.get('vol_z', '─'):.2f}  CVD={s.get('cvd', '─')}" if isinstance(s.get('vol_z'), float) else ""
             lines.append(
                 f"▲ 매수  {s['name']}({s['code']})  슬롯{s['slot']}\n"
                 f"   진입가 {price_fmt}  ×  {s['qty']}주  =  {amt_fmt}\n"
-                f"   RSI-2={s['rsi2']}  ADX={s['adx']}"
+                f"   L2: RSI-2={s['rsi2']}  ADX={s['adx']}"
+                + (f"\n   L3: {vol_info}" if vol_info else "")
             )
     else:
         lines.append("─ 매수 신호 없음")
@@ -364,11 +537,15 @@ def build_message(today, signals, exits, signal_date, kpi_data=None,
     )
     lines.append("")
 
-    # 파라미터
+    # 파라미터 (5-Layer 전체 표시)
     p = PARAMS
     lines.append(
-        f"⚙️ <code>RSI진입≤{p['rsi2Entry']} 청산≥{p['rsi2Exit']} "
-        f"ADX≥{p['adxMin']} TS={p['trailing']}% HS={p['hardStop']}%</code>"
+        f"⚙️ <code>"
+        f"L2:RSI≤{p['rsi2Entry']} ADX≥{p['adxMin']}  "
+        f"L3:Vz≥{p['zscore']} CVD{p['cvdWin']}d  "
+        f"L4:ML≥{p['mlThresh']}  "
+        f"L5:HS={p['hardStop']}% TS={p['trailing']}%"
+        f"</code>"
     )
 
     return "\n".join(lines)
