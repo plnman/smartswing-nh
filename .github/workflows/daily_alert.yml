@@ -1,21 +1,27 @@
 # ══════════════════════════════════════════════════════════════
 #  SmartSwing-NH  ·  Daily Automation (KST)
 #
-#  Job 1 — send-alert  : 15:00 KST (UTC 06:00)  Telegram 알림
-#  Job 2 — update-udb  : 15:40 KST (UTC 06:40)  Firebase UDB 저장
+#  ★ 트리거 이중화 구조:
+#  [1차] 외부 크론 서비스(cron-job.org)가 정각 15:00에 workflow_dispatch 호출
+#        → GitHub Actions 즉시 실행 (큐 우선처리)
+#  [2차] 안전망 cron: 14:10 KST (UTC 05:10) — 1차 실패 시 최대 15:10까지 백업
+#        (기존 06:00 cron은 피크타임 1시간+ 지연 → 폐기)
 #
-#  평일(월~금) 자동 실행 / workflow_dispatch로 수동 강제 실행 가능
+#  Job 1 — send-alert  : 15:00 KST  Telegram 알림 (외부 트리거 기준)
+#  Job 2 — update-udb  : 15:40 KST  Firebase UDB 저장
 # ══════════════════════════════════════════════════════════════
 name: Daily Automation (15:00 + 15:40 KST)
 
 on:
   schedule:
-    # Job 1: UTC 06:00 = KST 15:00 (월~금)
-    - cron: "0 6 * * 1-5"
-    # Job 2: UTC 06:40 = KST 15:40 (월~금)
-    - cron: "40 6 * * 1-5"
+    # ★ [안전망] UTC 05:10 = KST 14:10 (피크타임 전 선제 실행, 최대 1h 지연돼도 15:10 도착)
+    - cron: "10 5 * * 1-5"
+    # ★ [안전망] UTC 06:30 = KST 15:30 (UDB 업데이트, 기존 06:40 대비 10분 앞당김)
+    - cron: "30 6 * * 1-5"
 
-  # 수동 실행 버튼 (테스트용 — 두 Job 모두 강제 실행)
+  # ★ [1차 트리거] 외부 크론 서비스(cron-job.org)가 15:00 정각에 호출
+  #    설정 URL: https://api.github.com/repos/plnman/smartswing-nh/actions/workflows/daily_alert.yml/dispatches
+  #    Method: POST  Body: {"ref":"main"}  Header: Authorization Bearer <PAT>
   workflow_dispatch:
 
 # ──────────────────────────────────────────────
@@ -26,10 +32,10 @@ jobs:
     name: "📨 15:00 Telegram 알림"
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # schedule 트리거일 때: 06:00 cron만 실행 (06:40은 건너뜀)
+    # workflow_dispatch(외부 크론 or 수동) 또는 안전망 cron 14:10(UTC 05:10)만 실행
     if: |
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'schedule' && github.event.schedule == '0 6 * * 1-5')
+      (github.event_name == 'schedule' && github.event.schedule == '10 5 * * 1-5')
 
     steps:
       - name: Checkout
@@ -59,10 +65,10 @@ jobs:
     name: "🔄 15:40 Firebase UDB 업데이트"
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # schedule 트리거일 때: 06:40 cron만 실행 (06:00은 건너뜀)
+    # workflow_dispatch(외부 크론 or 수동) 또는 안전망 cron 15:30(UTC 06:30)만 실행
     if: |
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'schedule' && github.event.schedule == '40 6 * * 1-5')
+      (github.event_name == 'schedule' && github.event.schedule == '30 6 * * 1-5')
 
     steps:
       - name: Checkout
