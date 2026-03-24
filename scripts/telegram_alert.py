@@ -323,17 +323,32 @@ def load_params_from_firebase() -> dict:
     return defaults
 
 
-def load_holdings_from_firebase() -> set:
+def load_holdings_from_firebase() -> dict:
+    """
+    Returns:
+      {code: {"entry_price": float|None, "quantity": int|None,
+              "entry_date": str|None, "high_price": float|None, "name": str|None}}
+    entry_price 등이 없는 구형 문서(코드 ID만)도 key로 포함.
+    """
     try:
         db = _init_firebase()
         if db is None:
-            return set()
-        codes = {d.id for d in db.collection("holdings").stream()}
-        print(f"  ✅ 보유 종목: {codes if codes else '없음'}")
-        return codes
+            return {}
+        holdings = {}
+        for doc in db.collection("holdings").stream():
+            d = doc.to_dict() or {}
+            holdings[doc.id] = {
+                "entry_price": d.get("entry_price"),
+                "quantity":    d.get("quantity"),
+                "entry_date":  d.get("entry_date"),
+                "high_price":  d.get("high_price"),
+                "name":        d.get("name"),
+            }
+        print(f"  ✅ 보유 종목: {list(holdings.keys()) if holdings else '없음'}")
+        return holdings
     except Exception as e:
         print(f"  ⚠ holdings 로드 실패: {e}")
-        return set()
+        return {}
 
 
 def load_kpi_from_firebase() -> dict:
@@ -379,6 +394,111 @@ def save_to_firebase(today_str: str, signals: list, exits: list,
         print(f"  ✅ Firebase /daily/{today_str} 저장 완료")
     except Exception as e:
         print(f"  ⚠ Firebase 저장 실패: {e}")
+
+
+def save_holdings_to_firebase(signals: list, current_holdings: dict):
+    """
+    매수 신호 발생 시 /holdings/{code} 에 진입 정보 자동 저장.
+    이미 entry_price 가 기록된 종목은 덮어쓰지 않음 (중복 진입 방지).
+    """
+    if not signals:
+        return
+    try:
+        db = _init_firebase()
+        if db is None:
+            return
+        kst_now  = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
+        today_str = kst_now.strftime("%Y-%m-%d")
+        for s in signals:
+            code    = s["code"]
+            existing = current_holdings.get(code, {})
+            if existing.get("entry_price") is not None:
+                print(f"  ℹ {s['name']}({code}) 이미 보유 중 — holdings 유지")
+                continue
+            doc_data = {
+                "entry_price": float(s["price"]),
+                "quantity":    int(s["qty"]),
+                "entry_date":  today_str,
+                "high_price":  float(s["price"]),   # 최초 고가 = 진입가
+                "name":        s["name"],
+            }
+            db.collection("holdings").document(code).set(doc_data)
+            print(f"  ✅ holdings 저장: {s['name']}({code})  "
+                  f"₩{s['price']:,.0f} × {s['qty']}주  진입일 {today_str}")
+    except Exception as e:
+        print(f"  ⚠ holdings 저장 실패: {e}")
+
+
+def update_high_price_and_check_stops(
+        holdings: dict, prices: dict, p: dict) -> list:
+    """
+    매일 15:00 실행 시 보유 종목별:
+      1) 현재가 > 기존 high_price → Firebase high_price 갱신
+      2) hardStop  : entry_price 대비 현재가 하락률 ≥ p["hardStop"]%
+      3) trailing  : high_price 대비 현재가 하락률 ≥ p["trailing"]%
+
+    Returns:
+      [{"code", "name", "alert_type", "entry_price", "current_price",
+        "high_price", "pct_from_entry", "pct_from_high"}]
+    """
+    alerts = []
+    if not holdings:
+        return alerts
+    try:
+        db = _init_firebase()
+        if db is None:
+            return alerts
+
+        hard_pct     = float(p.get("hardStop",  5.3))
+        trailing_pct = float(p.get("trailing",  7.6))
+
+        for code, info in holdings.items():
+            entry_price = info.get("entry_price")
+            high_price  = info.get("high_price")
+            name        = info.get("name") or code
+            curr_price  = prices.get(code)
+
+            if entry_price is None or curr_price is None or curr_price <= 0:
+                continue
+
+            # high_price 갱신
+            new_high = high_price or entry_price
+            if curr_price > new_high:
+                new_high = curr_price
+                try:
+                    db.collection("holdings").document(code).update(
+                        {"high_price": float(new_high)})
+                    print(f"  📈 {name}({code}) high_price 갱신: ₩{new_high:,.0f}")
+                except Exception as upd_e:
+                    print(f"  ⚠ high_price 갱신 실패 ({code}): {upd_e}")
+
+            pct_from_entry = (curr_price / entry_price - 1) * 100  # 음수 = 손실
+            pct_from_high  = (curr_price / new_high  - 1) * 100   # 음수 = 고점 대비 하락
+
+            alert_types = []
+            if pct_from_entry <= -hard_pct:
+                alert_types.append("hardStop")
+            if pct_from_high  <= -trailing_pct:
+                alert_types.append("trailing")
+
+            if alert_types:
+                alerts.append({
+                    "code":            code,
+                    "name":            name,
+                    "alert_type":      "/".join(alert_types),
+                    "entry_price":     entry_price,
+                    "current_price":   curr_price,
+                    "high_price":      new_high,
+                    "pct_from_entry":  round(pct_from_entry, 2),
+                    "pct_from_high":   round(pct_from_high,  2),
+                })
+                print(f"  🚨 STOP 경고: {name}({code})  "
+                      f"진입대비 {pct_from_entry:+.2f}%  "
+                      f"고점대비 {pct_from_high:+.2f}%  [{'/'.join(alert_types)}]")
+
+    except Exception as e:
+        print(f"  ⚠ stop 체크 실패: {e}")
+    return alerts
 
 
 # ═══════════════════════════════════════════════════════════
@@ -686,7 +806,8 @@ def get_real_signals(today: datetime.datetime):
 
 def build_message(today, signals, exits, signal_date,
                   kpi_data=None, is_fallback=False,
-                  holdings: set = None, market_info: dict = None):
+                  holdings: dict = None, market_info: dict = None,
+                  stop_alerts: list = None):
     date_str = today.strftime("%Y-%m-%d")
     time_str = today.strftime("%H:%M")
     kpi_map  = kpi_data or KPI_FALLBACK
@@ -744,15 +865,46 @@ def build_message(today, signals, exits, signal_date,
             lines.append("─ 매수 신호 없음")
     lines.append("")
 
-    # 청산 후보
+    # 청산 후보 — RSI-2 과매수 + hardStop/trailing 경고 통합
     held_exits  = [e for e in exits if holdings and e["code"] in holdings]
     other_exits = [e for e in exits if not holdings or e["code"] not in holdings]
+    sa          = stop_alerts or []
 
-    lines.append("<b>[ 청산 후보 (보유 종목 · RSI-2 과매수) ]</b>")
-    if held_exits:
-        for e in held_exits:
-            lines.append(f"⬇ {e['name']}({e['code']})  RSI-2={e['rsi2']}  → 매도 검토")
-    else:
+    # stop 경고 코드 집합 (중복 출력 방지용)
+    stop_codes = {a["code"] for a in sa}
+
+    lines.append("<b>[ 청산 후보 (보유 종목) ]</b>")
+
+    any_exit = False
+
+    # ① hardStop / trailing 경고 (최우선)
+    for a in sa:
+        any_exit = True
+        tag = ""
+        if "hardStop" in a["alert_type"] and "trailing" in a["alert_type"]:
+            tag = "🔴 하드스탑+트레일링"
+        elif "hardStop" in a["alert_type"]:
+            tag = "🔴 하드스탑"
+        else:
+            tag = "🟠 트레일링스탑"
+        lines.append(
+            f"{tag}  {a['name']}({a['code']})\n"
+            f"   진입 ₩{a['entry_price']:,.0f}  현재 ₩{a['current_price']:,.0f}"
+            f"  진입대비 <code>{a['pct_from_entry']:+.2f}%</code>\n"
+            f"   고점 ₩{a['high_price']:,.0f}  고점대비 <code>{a['pct_from_high']:+.2f}%</code>"
+            f"  [{a['alert_type']}]"
+        )
+
+    # stop_code → alert_type 빠른 조회
+    stop_type_map = {a["code"]: a["alert_type"] for a in sa}
+
+    # ② RSI-2 과매수 (stop 경고와 중복 시 병기)
+    for e in held_exits:
+        any_exit = True
+        extra = f"  (+ {stop_type_map[e['code']]})" if e["code"] in stop_codes else ""
+        lines.append(f"⬇ {e['name']}({e['code']})  RSI-2={e['rsi2']}  → 매도 검토{extra}")
+
+    if not any_exit:
         lines.append("─ 없음")
     lines.append("")
 
@@ -839,15 +991,36 @@ def main():
     signals, exits, signal_date, prices, is_fallback, market_info = get_real_signals(today)
     print(f"\n⏱ 총 소요: {time.time()-t_total:.0f}초")
 
+    # ── 매수 신호 발생 시 Firebase /holdings/{code} 자동 저장
+    if signals:
+        print("\n💾 holdings 자동 저장 중...")
+        save_holdings_to_firebase(signals, holdings)
+        # holdings dict 갱신 (방금 저장한 신호 정보 반영 — 이후 stop 체크에 사용)
+        for s in signals:
+            if s["code"] not in holdings or holdings[s["code"]].get("entry_price") is None:
+                holdings[s["code"]] = {
+                    "entry_price": float(s["price"]),
+                    "quantity":    int(s["qty"]),
+                    "entry_date":  today.strftime("%Y-%m-%d"),
+                    "high_price":  float(s["price"]),
+                    "name":        s["name"],
+                }
+
+    # ── hardStop / trailing 조건 체크
+    print("\n🛡 보유 종목 stop 조건 체크...")
+    stop_alerts = update_high_price_and_check_stops(holdings, prices, PARAMS)
+
     msg = build_message(today, signals, exits, signal_date,
-                        kpi_data, is_fallback, holdings, market_info)
+                        kpi_data, is_fallback, holdings, market_info,
+                        stop_alerts=stop_alerts)
     print("─── 전송 메시지 ───")
     print(msg)
     print("──────────────────")
 
     result = send_telegram(msg)
     if result.get("ok"):
-        print(f"✅ 전송 성공  (매수 {len(signals)}개, 청산후보 {len(exits)}개)")
+        print(f"✅ 전송 성공  (매수 {len(signals)}개, 청산후보 {len(exits)}개, "
+              f"stop경고 {len(stop_alerts)}개)")
     else:
         print(f"❌ 전송 실패: {result}")
 
