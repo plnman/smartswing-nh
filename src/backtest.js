@@ -104,9 +104,6 @@ export const KPI_BY_PERIOD = {
 // 상승장(25-03~26-03) +156% / 하락장(22-01~24-12) +67% / 5년 +387% MDD -1.8%
 export const DEFAULT_PARAMS = {
   adx:20, rsi2Entry:15, zscore:1.0,
-  // [DEPRECATED] mlThresh: mlPassMax=100-(mlThresh-55)=98 → seed>98 skip(~1%)
-  // 실전(telegram_alert.py)에서 seed 개념 없어 미사용. 향후 제거 예정.
-  mlThresh:57,
   nSlots:5,
   // hardStop: DEFAULT_PARAMS에 존재하지만 runBacktest에서 직접 미사용.
   // 실제 적용: getStockHardStop(code, ym, atrMult) = clamp(1.5, ATR14%×atrMult, 8.0%)
@@ -114,10 +111,9 @@ export const DEFAULT_PARAMS = {
   hardStop:5.3, atrMult:1.6,
   // timeCutOn:false → 비활성화 상태. 실전에도 없음.
   timeCutOn:false, timeCut:10,
-  // trailing 의미 동기화 주석:
-  //   backtest(시뮬)  : ret = Math.min(ret, trailing*7+5) → 수익 상한선 (=58.2%)
-  //   telegram(실전)  : pct_from_high ≤ -trailing% → 고점 대비 하락 시 청산
-  //   동일 파라미터값(7.6)을 각 맥락에서 최적 방식으로 적용. 의도적 차이.
+  // trailing: 실전(telegram_alert.py) 전용 파라미터 — 고점 대비 -trailing% 하락 시 청산
+  //   백테스트는 월별 종가 기준 계산으로 일중 고점 추적 불가 → Trailing Stop 미포함
+  //   반락 구간에서 실전 대비 백테스트 수익이 낮게 나올 수 있음 (백테스트 수치는 보수적)
   trailing:7.6, rsi2Exit:99,
   finBertThresh:0.09,
   cvdWin:70, cvdCompare:7,
@@ -215,8 +211,6 @@ export function runBacktest(period, params, customRange = null) {
 
   const sigThreshBase = Math.max(0.8, (params.adx - 20) * 0.15);
   const sigThresh = sigThreshBase * Math.max(0.6, params.zscore * 0.35);
-  // [DEPRECATED] mlPassMax: mlThresh=57 → 98. seed(0~99)>98 → ~1% skip. 영향 미미.
-  const mlPassMax = 100 - (params.mlThresh - 55);
 
   const NSLOTS = params?.nSlots ?? 5;
   const tradeLog = [];
@@ -237,7 +231,6 @@ export function runBacktest(period, params, customRange = null) {
       const seed = (m.month * 17 + (m.year % 100) * 31 + i * 7 + slot * 37) % 100;
 
       if (absR < sigThresh * 2 && seed % 2 === 0) continue;
-      if (seed > mlPassMax) continue; // [DEPRECATED] ~1% 영향
 
       if (i > 0 && m.r < -1) {
         const sentScore = monthly[i - 1].r / 15;
@@ -301,14 +294,14 @@ export function runBacktest(period, params, customRange = null) {
 
       const stockHardStop = getStockHardStop(stock.code, ym, params.atrMult);
       ret = Math.max(ret, -(stockHardStop + 0.3));
-      ret = Math.min(ret, params.trailing * 7 + 5);
+      // ※ Trailing Stop은 실전(telegram_alert.py) 전용 — 고점 대비 -trailing% 하락 시 청산
+      //   백테스트는 월별 데이터 한계로 일중 고점 추적 불가 → 미포함 (보수적 결과)
       ret = +(ret - TRADE_COST_PCT).toFixed(1);
 
       const pnl = Math.round(ret / 100 * CAPITAL_PER_SLOT);
       const l4  = `${61 + (seed % 27)}%`;
       let reason;
-      if      (ret >= params.trailing * 7 + 4.5) reason = "Trailing";
-      else if (ret > 0)                           reason = `RSI-2≥${params.rsi2Exit}`;
+      if      (ret > 0)                           reason = `RSI-2≥${params.rsi2Exit}`;
       else if (ret > -(stockHardStop + 0.2))       reason = `ATR HardStop(${stockHardStop}%)`;
       else                                        reason = "갭다운";
 
@@ -534,8 +527,6 @@ export function runBacktestLive(period, params, customRange = null, liveData = n
 
   const sigThreshBase = Math.max(0.8, (params.adx - 20) * 0.15);
   const sigThresh = sigThreshBase * Math.max(0.6, params.zscore * 0.35);
-  // [DEPRECATED] mlPassMax: mlThresh=57 → 98. seed(0~99)>98 → ~1% skip. 영향 미미.
-  const mlPassMax = 100 - (params.mlThresh - 55);
 
   const NSLOTS = params?.nSlots ?? 5;
   const tradeLog = [];
@@ -548,7 +539,6 @@ export function runBacktestLive(period, params, customRange = null, liveData = n
     for (let slot = 0; slot < NSLOTS; slot++) {
       const seed = (m.month * 17 + (m.year % 100) * 31 + i * 7 + slot * 37) % 100;
       if (absR < sigThresh * 2 && seed % 2 === 0) continue;
-      if (seed > mlPassMax) continue; // [DEPRECATED] ~1% 영향
       if (i > 0 && m.r < -1) {
         const sentScore = monthly[i - 1].r / 15;
         if (sentScore < params.finBertThresh) continue;
@@ -616,14 +606,14 @@ export function runBacktestLive(period, params, customRange = null, liveData = n
       };
       const stockHardStop = getStockHS(stock.code, `${yy}-${mm}`, params.atrMult);
       ret = Math.max(ret, -(stockHardStop + 0.3));
-      ret = Math.min(ret, params.trailing * 7 + 5);
+      // ※ Trailing Stop은 실전(telegram_alert.py) 전용 — 고점 대비 -trailing% 하락 시 청산
+      //   백테스트는 월별 데이터 한계로 일중 고점 추적 불가 → 미포함 (반락 구간 실전 대비 수익 낮을 수 있음)
       ret = +(ret - TRADE_COST_PCT).toFixed(1);
 
       const pnl = Math.round(ret / 100 * CAPITAL_PER_SLOT);
       const l4  = `${61 + (seed % 27)}%`;
       let reason;
-      if      (ret >= params.trailing * 7 + 4.5) reason = "Trailing";
-      else if (ret > 0)                           reason = `RSI-2≥${params.rsi2Exit}`;
+      if      (ret > 0)                           reason = `RSI-2≥${params.rsi2Exit}`;
       else if (ret > -(stockHardStop + 0.2))       reason = `ATR HardStop(${stockHardStop}%)`;
       else                                        reason = "갭다운";
 

@@ -256,19 +256,14 @@ PARAMS = {
     "adx":           20,    # ADX 최소값 (시장 추세 강도 / 종목 ADX 하한)
     "rsi2Entry":     15,    # RSI-2 진입 임계값 (이하일 때 매수)
     "zscore":        1.0,   # sigThresh 스케일 인자
-    # [DEPRECATED] backtest.js mlPassMax=100-(mlThresh-55)=98 → seed>98 skip(~1%)
-    # 실전에서 seed 개념 없음 → 사용 안 함. 향후 제거 예정.
-    "mlThresh":      57,
     "nSlots":        5,     # 동시 보유 최대 종목 수
     # hardStop: backtest.js에서도 직접 미사용 (atrMult 기반 동적 계산이 우선)
     # 실전 fallback용 — holdings에 hard_stop_pct 없을 때만 적용
     "hardStop":      5.3,
     "atrMult":       1.6,   # backtest.js getStockHardStop과 동일
                             # dynamic_hard_stop = clamp(1.5%, ATR14% × atrMult, 8.0%)
-    # trailing 의미 동기화:
-    #   backtest.js  : ret ≤ trailing*7+5 (=58.2%) — 수익 상한선 (시뮬 단순화)
-    #   telegram(실전): pct_from_high ≤ -trailing%  — 고점 대비 하락 청산 (전통적 trailing)
-    #   동일 파라미터값(7.6)을 공유하며 각 맥락에서 최적 방식으로 적용
+    # trailing: 실전 전용 — pct_from_high ≤ -trailing% 시 청산 경고
+    #   backtest.js는 월별 데이터 한계로 Trailing Stop 미포함 (반락 구간 백테스트 수치 보수적)
     "trailing":      7.6,
     "rsi2Exit":      99,    # RSI-2 청산 임계값 (backtest.js와 완전 동일)
     "finBertThresh": 0.09,  # L1: 전월 수익률/15 임계값
@@ -316,7 +311,6 @@ def load_params_from_firebase() -> dict:
                 "adx":           float(d.get("adx",           defaults["adx"])),
                 "rsi2Entry":     float(d.get("rsi2Entry",     defaults["rsi2Entry"])),
                 "zscore":        float(d.get("zscore",        defaults["zscore"])),
-                "mlThresh":      int  (d.get("mlThresh",      defaults["mlThresh"])),  # DEPRECATED
                 "nSlots":        int  (d.get("nSlots",        defaults["nSlots"])),
                 "hardStop":      float(d.get("hardStop",      defaults["hardStop"])),  # fallback only
                 "atrMult":       float(d.get("atrMult",       defaults["atrMult"])),   # dynamic hardStop
