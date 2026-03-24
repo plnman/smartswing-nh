@@ -274,9 +274,10 @@ PARAMS = {
 CAPITAL_PER_SLOT = 10_000_000
 
 KPI_FALLBACK = {
-    "1년": {"totalRet": 159.5, "annRet": 159.5, "mdd": -7.6},
-    "3년": {"totalRet": 167.8, "annRet": 38.9,  "mdd": -17.2},
-    "5년": {"totalRet": 107.8, "annRet": 15.8,  "mdd": -35.9},
+    # 2026-03-24 재산출 — Profit Cap 제거 후
+    "1년": {"totalRet": 155.5, "annRet": 137.7, "mdd": -5.9},
+    "3년": {"totalRet": 248.0, "annRet":  49.8, "mdd": -4.7},
+    "5년": {"totalRet": 380.3, "annRet":  36.2, "mdd": -1.9},
 }
 
 PAT_EXPIRY_DATE = datetime.date(2026, 12, 31)

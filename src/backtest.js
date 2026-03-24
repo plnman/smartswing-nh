@@ -93,11 +93,11 @@ export const ALL_MONTHLY = [
   {date:"26-03",label:"2026-03",m:"3월",year:2026,month:3,r:-7.6},
 ];
 
-// 기간별 실제 KOSPI200 KPI (사전 계산, 2026-03-20 기준)
+// 기간별 전략 KPI (사전 계산, 2026-03-24 기준 — Profit Cap 제거 후 재산출)
 export const KPI_BY_PERIOD = {
-  "1년": { totalRet:159.5, annRet:159.5, mdd:-7.6,  vol:36.5, sharpe:2.89, months:13, start:"25-03", end:"26-03" },
-  "3년": { totalRet:167.8, annRet:38.9,  mdd:-17.2, vol:28.3, sharpe:1.31, months:37, start:"23-03", end:"26-03" },
-  "5년": { totalRet:107.8, annRet:15.8,  mdd:-35.9, vol:26.2, sharpe:0.69, months:61, start:"21-03", end:"26-03" },
+  "1년": { totalRet:155.5, annRet:137.7, mdd:-5.9,  vol:30.0, sharpe:4.59, months:13, start:"25-03", end:"26-03" },
+  "3년": { totalRet:248.0, annRet:49.8,  mdd:-4.7,  vol:18.9, sharpe:2.63, months:37, start:"23-03", end:"26-03" },
+  "5년": { totalRet:380.3, annRet:36.2,  mdd:-1.9,  vol:14.2, sharpe:2.55, months:61, start:"21-03", end:"26-03" },
 };
 
 // 확정 파라미터 v11.0 (2026-03-22 Optuna 200trials 다중기간 최적화)
