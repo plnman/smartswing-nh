@@ -103,9 +103,22 @@ export const KPI_BY_PERIOD = {
 // 확정 파라미터 v11.0 (2026-03-22 Optuna 200trials 다중기간 최적화)
 // 상승장(25-03~26-03) +156% / 하락장(22-01~24-12) +67% / 5년 +387% MDD -1.8%
 export const DEFAULT_PARAMS = {
-  adx:20, rsi2Entry:15, zscore:1.0, mlThresh:57, nSlots:5,
+  adx:20, rsi2Entry:15, zscore:1.0,
+  // [DEPRECATED] mlThresh: mlPassMax=100-(mlThresh-55)=98 → seed>98 skip(~1%)
+  // 실전(telegram_alert.py)에서 seed 개념 없어 미사용. 향후 제거 예정.
+  mlThresh:57,
+  nSlots:5,
+  // hardStop: DEFAULT_PARAMS에 존재하지만 runBacktest에서 직접 미사용.
+  // 실제 적용: getStockHardStop(code, ym, atrMult) = clamp(1.5, ATR14%×atrMult, 8.0%)
+  // telegram_alert.py도 동일 공식으로 통일 완료 (2026-03-24).
   hardStop:5.3, atrMult:1.6,
-  timeCutOn:false, timeCut:10, trailing:7.6, rsi2Exit:99,
+  // timeCutOn:false → 비활성화 상태. 실전에도 없음.
+  timeCutOn:false, timeCut:10,
+  // trailing 의미 동기화 주석:
+  //   backtest(시뮬)  : ret = Math.min(ret, trailing*7+5) → 수익 상한선 (=58.2%)
+  //   telegram(실전)  : pct_from_high ≤ -trailing% → 고점 대비 하락 시 청산
+  //   동일 파라미터값(7.6)을 각 맥락에서 최적 방식으로 적용. 의도적 차이.
+  trailing:7.6, rsi2Exit:99,
   finBertThresh:0.09,
   cvdWin:70, cvdCompare:7,
 };
@@ -202,6 +215,7 @@ export function runBacktest(period, params, customRange = null) {
 
   const sigThreshBase = Math.max(0.8, (params.adx - 20) * 0.15);
   const sigThresh = sigThreshBase * Math.max(0.6, params.zscore * 0.35);
+  // [DEPRECATED] mlPassMax: mlThresh=57 → 98. seed(0~99)>98 → ~1% skip. 영향 미미.
   const mlPassMax = 100 - (params.mlThresh - 55);
 
   const NSLOTS = params?.nSlots ?? 5;
@@ -223,7 +237,7 @@ export function runBacktest(period, params, customRange = null) {
       const seed = (m.month * 17 + (m.year % 100) * 31 + i * 7 + slot * 37) % 100;
 
       if (absR < sigThresh * 2 && seed % 2 === 0) continue;
-      if (seed > mlPassMax) continue;
+      if (seed > mlPassMax) continue; // [DEPRECATED] ~1% 영향
 
       if (i > 0 && m.r < -1) {
         const sentScore = monthly[i - 1].r / 15;
@@ -346,39 +360,22 @@ export const heatColor = (v) => {
 // ════════════════════════════════════════════════════════════
 
 /** Firebase /udb 컬렉션 문서 배열을 ALL_MONTHLY에 merge
- *  ★ GDB_LAST 이상(>=) UDB 데이터는 GDB 고정값을 override — 당월 실시간 반영
+ *  GDB_LAST(26-03)는 GDB 확정값 사용. UDB는 GDB_LAST 초과(>) 신규 달만 추가.
+ *  3월이 진행 중인 동안 매일 바뀌는 문제 방지.
  */
 export function buildLiveMonthly(udbDocs = []) {
   const GDB_LAST = "26-03";
 
-  // UDB에서 GDB_LAST 이상인 달을 map으로 수집 (26-03 포함)
-  const udbMap = {};
-  udbDocs
-    .filter(u => u.date && u.date >= GDB_LAST)
-    .forEach(u => { udbMap[u.date] = u; });
-
-  // GDB_LAST 미만은 GDB 그대로 유지
-  const base = ALL_MONTHLY.filter(m => m.date < GDB_LAST);
-
-  // GDB_LAST 이상은 UDB 실시간값으로 대체 (없으면 GDB 유지)
-  const gdbTail = ALL_MONTHLY.filter(m => m.date >= GDB_LAST);
-  const liveTail = gdbTail.map(g => {
-    const u = udbMap[g.date];
-    if (!u) return g;  // UDB 없으면 GDB 유지
-    return { date: u.date, label: u.label || g.label, m: u.m || g.m,
-             year: u.year, month: u.month, r: u.r ?? g.r };
-  });
-
-  // GDB_LAST 초과 신규 달 추가
+  // GDB_LAST 초과 신규 달만 UDB에서 수집
   const newRows = udbDocs
-    .filter(u => u.date && u.date > GDB_LAST && !gdbTail.find(g => g.date === u.date))
+    .filter(u => u.date && u.date > GDB_LAST)
     .sort((a, b) => a.date.localeCompare(b.date))
     .map(u => ({
       date: u.date, label: u.label || `20${u.date}`, m: u.m || `${u.month}월`,
       year: u.year, month: u.month, r: u.r ?? 0,
     }));
 
-  return [...base, ...liveTail, ...newRows];
+  return [...ALL_MONTHLY, ...newRows];
 }
 
 /** Firebase /udb 문서 배열로 EQUITY_CURVE_RAW 연장
@@ -537,6 +534,7 @@ export function runBacktestLive(period, params, customRange = null, liveData = n
 
   const sigThreshBase = Math.max(0.8, (params.adx - 20) * 0.15);
   const sigThresh = sigThreshBase * Math.max(0.6, params.zscore * 0.35);
+  // [DEPRECATED] mlPassMax: mlThresh=57 → 98. seed(0~99)>98 → ~1% skip. 영향 미미.
   const mlPassMax = 100 - (params.mlThresh - 55);
 
   const NSLOTS = params?.nSlots ?? 5;
@@ -550,7 +548,7 @@ export function runBacktestLive(period, params, customRange = null, liveData = n
     for (let slot = 0; slot < NSLOTS; slot++) {
       const seed = (m.month * 17 + (m.year % 100) * 31 + i * 7 + slot * 37) % 100;
       if (absR < sigThresh * 2 && seed % 2 === 0) continue;
-      if (seed > mlPassMax) continue;
+      if (seed > mlPassMax) continue; // [DEPRECATED] ~1% 영향
       if (i > 0 && m.r < -1) {
         const sentScore = monthly[i - 1].r / 15;
         if (sentScore < params.finBertThresh) continue;

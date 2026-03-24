@@ -256,11 +256,21 @@ PARAMS = {
     "adx":           20,    # ADX 최소값 (시장 추세 강도 / 종목 ADX 하한)
     "rsi2Entry":     15,    # RSI-2 진입 임계값 (이하일 때 매수)
     "zscore":        1.0,   # sigThresh 스케일 인자
-    "mlThresh":      57,    # 약한 모멘텀 시 슬롯 조정용 (mlPassMax = 100 - (mlThresh-55))
+    # [DEPRECATED] backtest.js mlPassMax=100-(mlThresh-55)=98 → seed>98 skip(~1%)
+    # 실전에서 seed 개념 없음 → 사용 안 함. 향후 제거 예정.
+    "mlThresh":      57,
     "nSlots":        5,     # 동시 보유 최대 종목 수
-    "hardStop":      5.3,   # 하드스탑 % (알림 표시용)
-    "trailing":      7.6,   # 트레일링 스탑 % (알림 표시용)
-    "rsi2Exit":      99,    # RSI-2 청산 임계값
+    # hardStop: backtest.js에서도 직접 미사용 (atrMult 기반 동적 계산이 우선)
+    # 실전 fallback용 — holdings에 hard_stop_pct 없을 때만 적용
+    "hardStop":      5.3,
+    "atrMult":       1.6,   # backtest.js getStockHardStop과 동일
+                            # dynamic_hard_stop = clamp(1.5%, ATR14% × atrMult, 8.0%)
+    # trailing 의미 동기화:
+    #   backtest.js  : ret ≤ trailing*7+5 (=58.2%) — 수익 상한선 (시뮬 단순화)
+    #   telegram(실전): pct_from_high ≤ -trailing%  — 고점 대비 하락 청산 (전통적 trailing)
+    #   동일 파라미터값(7.6)을 공유하며 각 맥락에서 최적 방식으로 적용
+    "trailing":      7.6,
+    "rsi2Exit":      99,    # RSI-2 청산 임계값 (backtest.js와 완전 동일)
     "finBertThresh": 0.09,  # L1: 전월 수익률/15 임계값
     "cvdWin":        70,    # CVD 윈도우 (일, /15 = 개월)
     "cvdCompare":    7,     # cvdGate = -floor(7/2) = -3
@@ -306,9 +316,10 @@ def load_params_from_firebase() -> dict:
                 "adx":           float(d.get("adx",           defaults["adx"])),
                 "rsi2Entry":     float(d.get("rsi2Entry",     defaults["rsi2Entry"])),
                 "zscore":        float(d.get("zscore",        defaults["zscore"])),
-                "mlThresh":      int  (d.get("mlThresh",      defaults["mlThresh"])),
+                "mlThresh":      int  (d.get("mlThresh",      defaults["mlThresh"])),  # DEPRECATED
                 "nSlots":        int  (d.get("nSlots",        defaults["nSlots"])),
-                "hardStop":      float(d.get("hardStop",      defaults["hardStop"])),
+                "hardStop":      float(d.get("hardStop",      defaults["hardStop"])),  # fallback only
+                "atrMult":       float(d.get("atrMult",       defaults["atrMult"])),   # dynamic hardStop
                 "trailing":      float(d.get("trailing",      defaults["trailing"])),
                 "rsi2Exit":      float(d.get("rsi2Exit",      defaults["rsi2Exit"])),
                 "finBertThresh": float(d.get("finBertThresh", defaults["finBertThresh"])),
@@ -316,7 +327,7 @@ def load_params_from_firebase() -> dict:
                 "cvdCompare":    float(d.get("cvdCompare",    defaults["cvdCompare"])),
             }
             print(f"  ✅ Firebase PARAMS: adx={loaded['adx']} rsi2Entry={loaded['rsi2Entry']} "
-                  f"nSlots={loaded['nSlots']} rsi2Exit={loaded['rsi2Exit']}")
+                  f"nSlots={loaded['nSlots']} atrMult={loaded['atrMult']} rsi2Exit={loaded['rsi2Exit']}")
             return loaded
     except Exception as e:
         print(f"  ⚠ PARAMS 로드 실패: {e}")
@@ -338,11 +349,12 @@ def load_holdings_from_firebase() -> dict:
         for doc in db.collection("holdings").stream():
             d = doc.to_dict() or {}
             holdings[doc.id] = {
-                "entry_price": d.get("entry_price"),
-                "quantity":    d.get("quantity"),
-                "entry_date":  d.get("entry_date"),
-                "high_price":  d.get("high_price"),
-                "name":        d.get("name"),
+                "entry_price":   d.get("entry_price"),
+                "quantity":      d.get("quantity"),
+                "entry_date":    d.get("entry_date"),
+                "high_price":    d.get("high_price"),
+                "name":          d.get("name"),
+                "hard_stop_pct": d.get("hard_stop_pct"),  # ATR 기반 종목별 동적 hardStop
             }
         print(f"  ✅ 보유 종목: {list(holdings.keys()) if holdings else '없음'}")
         return holdings
@@ -416,11 +428,15 @@ def save_holdings_to_firebase(signals: list, current_holdings: dict):
                 print(f"  ℹ {s['name']}({code}) 이미 보유 중 — holdings 유지")
                 continue
             doc_data = {
-                "entry_price": float(s["price"]),
-                "quantity":    int(s["qty"]),
-                "entry_date":  today_str,
-                "high_price":  float(s["price"]),   # 최초 고가 = 진입가
-                "name":        s["name"],
+                "entry_price":   float(s["price"]),
+                "quantity":      int(s["qty"]),
+                "entry_date":    today_str,
+                "high_price":    float(s["price"]),         # 최초 고가 = 진입가
+                "name":          s["name"],
+                "hard_stop_pct": float(s.get("hard_stop_pct",
+                                             PARAMS.get("hardStop", 5.3))),
+                # hard_stop_pct: 진입 시점 ATR×atrMult 동적값 저장
+                # (backtest.js getStockHardStop 동일 로직)
             }
             db.collection("holdings").document(code).set(doc_data)
             print(f"  ✅ holdings 저장: {s['name']}({code})  "
@@ -449,14 +465,17 @@ def update_high_price_and_check_stops(
         if db is None:
             return alerts
 
-        hard_pct     = float(p.get("hardStop",  5.3))
-        trailing_pct = float(p.get("trailing",  7.6))
+        # global fallback (holdings에 hard_stop_pct 없는 구형 문서용)
+        hard_pct_fallback = float(p.get("hardStop",  5.3))
+        trailing_pct      = float(p.get("trailing",  7.6))
 
         for code, info in holdings.items():
             entry_price = info.get("entry_price")
             high_price  = info.get("high_price")
             name        = info.get("name") or code
             curr_price  = prices.get(code)
+            # 종목별 동적 hardStop 우선, 없으면 global fallback
+            hard_pct = float(info.get("hard_stop_pct") or hard_pct_fallback)
 
             if entry_price is None or curr_price is None or curr_price <= 0:
                 continue
@@ -608,6 +627,24 @@ def _adx_series(df: pd.DataFrame, period: int = 14) -> pd.Series:
     return dx.ewm(span=period, adjust=False).mean()
 
 
+def _atr_pct(df: pd.DataFrame, period: int = 14) -> float:
+    """
+    ATR(14) / 종가 × 100 — backtest.js getStockHardStop 과 동일 기준.
+    dynamic_hard_stop = clamp(1.5%, ATR% × atrMult, 8.0%)
+    """
+    h  = df["고가"].astype(float)
+    l  = df["저가"].astype(float)
+    c  = df["종가"].astype(float)
+    pc = c.shift(1)
+    tr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
+    atr      = tr.ewm(span=period, adjust=False).mean()
+    last_c   = float(c.iloc[-1])
+    last_atr = float(atr.iloc[-1])
+    if last_c <= 0:
+        return 3.5  # 백테스트 폴백값과 동일
+    return last_atr / last_c * 100
+
+
 # ═══════════════════════════════════════════════════════════
 #  신호 생성 — 안 A (백테스팅 로직 완전 이식)
 # ═══════════════════════════════════════════════════════════
@@ -734,14 +771,20 @@ def get_real_signals(today: datetime.datetime):
             if pd.isna(rsi2) or pd.isna(adx):
                 continue
 
+            # ── dynamic hardStop (backtest.js getStockHardStop 동일 공식)
+            # clamp(1.5, ATR14% × atrMult, 8.0)
+            atr_pct_val   = _atr_pct(df, 14)
+            dyn_hard_stop = round(max(1.5, min(8.0, atr_pct_val * p["atrMult"])), 2)
+
             candidates.append({
-                "code":  code,
-                "name":  name_map.get(code, code),
-                "rsi2":  round(rsi2, 1),
-                "rsi14": round(rsi14, 1),
-                "adx":   round(adx, 1),
-                "vol_z": round(vol_z, 2),
-                "price": price,
+                "code":          code,
+                "name":          name_map.get(code, code),
+                "rsi2":          round(rsi2, 1),
+                "rsi14":         round(rsi14, 1),
+                "adx":           round(adx, 1),
+                "vol_z":         round(vol_z, 2),
+                "price":         price,
+                "hard_stop_pct": dyn_hard_stop,  # 종목별 동적 hardStop
             })
         except Exception:
             continue
@@ -773,16 +816,17 @@ def get_real_signals(today: datetime.datetime):
     for slot_idx, cand in enumerate(filtered[:effective_slots], start=1):
         qty = int(CAPITAL_PER_SLOT / cand["price"]) if cand["price"] > 0 else 0
         signals.append({
-            "name":  cand["name"],
-            "code":  cand["code"],
-            "slot":  slot_idx,
-            "price": cand["price"],
-            "qty":   qty,
-            "rsi2":  cand["rsi2"],
-            "rsi14": cand["rsi14"],
-            "adx":   cand["adx"],
-            "vol_z": cand["vol_z"],
-            "rank":  slot_idx,
+            "name":          cand["name"],
+            "code":          cand["code"],
+            "slot":          slot_idx,
+            "price":         cand["price"],
+            "qty":           qty,
+            "rsi2":          cand["rsi2"],
+            "rsi14":         cand["rsi14"],
+            "adx":           cand["adx"],
+            "vol_z":         cand["vol_z"],
+            "rank":          slot_idx,
+            "hard_stop_pct": cand["hard_stop_pct"],  # 종목별 ATR 기반 동적 hardStop
         })
 
     # ── 청산 후보: RSI-2 ≥ rsi2Exit
@@ -850,11 +894,13 @@ def build_message(today, signals, exits, signal_date,
     lines.append("<b>[ 오늘 매수 신호 ]</b>")
     if signals:
         for s in signals:
+            hs = s.get("hard_stop_pct") or p.get("hardStop", 5.3)
             lines.append(
                 f"▲ 슬롯{s['slot']}  {s['name']}({s['code']})\n"
                 f"   ₩{s['price']:,.0f}  ×  {s['qty']}주  "
                 f"= ₩{s['price'] * s['qty']:,.0f}\n"
                 f"   RSI-2={s['rsi2']}  ADX={s['adx']}  VolZ={s['vol_z']:+.2f}"
+                f"  HS={hs:.1f}%"
             )
     else:
         if blocked:
