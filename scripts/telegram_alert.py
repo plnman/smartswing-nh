@@ -423,7 +423,9 @@ def get_kospi200_monthly_history(today: datetime.datetime, n_months: int = 8) ->
     start_dt  = today - datetime.timedelta(days=(n_months + 2) * 35)
     start_str = start_dt.strftime("%Y%m%d")
     try:
-        df = pykrx_stock.get_index_ohlcv_by_date(start_str, today_str, "1028")
+        # pykrx get_index_ohlcv_by_date("1028") → KRX API '지수명' 컬럼 변경으로 오류
+        # KODEX 200 ETF(069500)로 대체 — KOSPI200 추종, 수익률 오차 <0.5%
+        df = pykrx_stock.get_market_ohlcv_by_date(start_str, today_str, "069500")
         if df.empty:
             return []
         close = df["종가"].astype(float)
