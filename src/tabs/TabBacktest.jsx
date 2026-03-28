@@ -6,7 +6,7 @@
 import React, { useState, useEffect, useMemo } from "react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer, ReferenceLine,
+  Tooltip, ResponsiveContainer, ReferenceLine, ReferenceArea,
 } from "recharts";
 import {
   EQUITY_CURVE_RAW, ALL_MONTHLY, DEFAULT_PARAMS,
@@ -355,38 +355,54 @@ export default function TabBacktest({ params, setParams, period, setPeriod, cust
     return std > 0 ? +((mean / std) * Math.sqrt(12)).toFixed(2) : 0;
   })();
 
-  const finalCapital    = Math.round(BASE_CAPITAL * (1 + stratTotalRet / 100));
+  // ── V3 Python 엔진 기준 KPI (상단 카드 표시용 — GDB 시뮬 아님)
+  const v3Kpi = (() => {
+    if (period !== "커스텀" && KPI_BY_PERIOD[period]) return KPI_BY_PERIOD[period];
+    // 커스텀 기간: EVOLUTION_DATA v3 슬라이스로 계산
+    if (period === "커스텀" && customRange?.start && customRange?.end) {
+      const cs = customRange.start.slice(0, 5);
+      const ce = customRange.end.slice(0, 5);
+      const sl = EVOLUTION_DATA.filter(d => d.date >= cs && d.date <= ce);
+      if (sl.length >= 2) {
+        const v3Ret = +((sl[sl.length - 1].v3 / sl[0].v3 - 1) * 100).toFixed(1);
+        let pk = -Infinity, maxDD = 0;
+        sl.forEach(d => { if (d.v3 > pk) pk = d.v3; const dd = (d.v3 - pk) / pk * 100; if (dd < maxDD) maxDD = dd; });
+        const nM = sl.length - 1;
+        const ann = nM >= 10 ? +((Math.pow(sl[sl.length - 1].v3 / sl[0].v3, 12 / nM) - 1) * 100).toFixed(1) : v3Ret;
+        return { totalRet: v3Ret, annRet: ann, mdd: +maxDD.toFixed(1), sharpe: stratShrp, vol: 0 };
+      }
+    }
+    return { totalRet: stratTotalRet, annRet: stratAnnRet, mdd: stratMdd, sharpe: stratShrp };
+  })();
+
+  const finalCapital    = Math.round(BASE_CAPITAL * (1 + v3Kpi.totalRet / 100));
   const profitCapital   = finalCapital - BASE_CAPITAL;
   const tradeTotalPnl   = tradeLog.reduce((s, t) => s + t.pnl, 0);
 
   const kpiCards = [
-    { label:"전략 누적 수익률",    val:`+${stratTotalRet}%`,
-      sub:`연환산 +${stratAnnRet}% | KOSPI200 +${kpi.totalRet}% (${kpi.start}~${kpi.end})`,
-      ok: stratTotalRet > kpi.totalRet,
+    { label:"전략 누적 수익률 (V3)",  val:`+${v3Kpi.totalRet}%`,
+      sub:`연환산 +${v3Kpi.annRet}% | KOSPI200 +${kpi.totalRet}% (${kpi.start}~${kpi.end})`,
+      ok: v3Kpi.totalRet > kpi.totalRet,
       capital: `원금 5천만 → ${krw(profitCapital)} (최종 ${(finalCapital/10000).toFixed(0)}만원)` },
-    { label:"최대 낙폭 MDD",       val:`${stratMdd}%`,
+    { label:"최대 낙폭 MDD",          val:`${v3Kpi.mdd}%`,
       sub:(() => {
         const km = Math.abs(kpi.mdd || 0);
-        if (km === 0) return `KOSPI MDD 계산중 / 전략 MDD ${stratMdd}%`;
-        const defStr = Math.abs(stratMdd) < km
-          ? Math.round((1 - Math.abs(stratMdd) / km) * 100) + "% 축소"
-          : Math.round((Math.abs(stratMdd) / km - 1) * 100) + "% 확대";
-        const extra = stratMdd === 0 && estimatedWorstRisk < 0
-          ? ` | 단월 리스크 추정 ${estimatedWorstRisk}%` : "";
-        return `KOSPI MDD ${kpi.mdd}% / 전략 ${defStr}${extra}`;
+        if (km === 0) return `KOSPI MDD 계산중 / V3 MDD ${v3Kpi.mdd}%`;
+        const defStr = Math.abs(v3Kpi.mdd) < km
+          ? Math.round((1 - Math.abs(v3Kpi.mdd) / km) * 100) + "% 축소"
+          : Math.round((Math.abs(v3Kpi.mdd) / km - 1) * 100) + "% 확대";
+        return `KOSPI MDD ${kpi.mdd}% / 전략 ${defStr}`;
       })(),
-      ok: Math.abs(stratMdd) <= Math.abs(kpi.mdd || 999) + 15,
-      capital: stratMdd === 0 && estimatedWorstRisk < 0
-        ? `월말 기준 낙폭 없음 (크로스월 이익 이월) / 리스크 추정 ${krw(Math.round(BASE_CAPITAL * estimatedWorstRisk / 100))}`
-        : `원금 5천만 기준 최대손실 ${krw(Math.round(BASE_CAPITAL * stratMdd / 100))}` },
-    { label:"승률 Win Rate",       val:`${stratWr}%`,
+      ok: Math.abs(v3Kpi.mdd) <= Math.abs(kpi.mdd || 999) + 15,
+      capital: `원금 5천만 기준 최대손실 ${krw(Math.round(BASE_CAPITAL * v3Kpi.mdd / 100))}` },
+    { label:"승률 Win Rate",           val:`${stratWr}%`,
       sub:`${tradeLog.length}건 거래 (5슬롯 기준) / 목표 ≥ 60%`, ok: stratWr >= 60,
       capital: `수익거래 합산 ${krw(tradeLog.filter(t=>t.ret>0).reduce((s,t)=>s+t.pnl,0))}` },
-    { label:"누적 손익 (단순)",    val:`${krw(tradeTotalPnl)}`,
+    { label:"누적 손익 (단순)",        val:`${krw(tradeTotalPnl)}`,
       sub:`5슬롯 재투자기준 ${krw(profitCapital)} / 거래별 1천만원 기준`, ok: tradeTotalPnl > 0,
       capital: `거래 ${tradeLog.length}건 단순합산` },
-    { label:"샤프 지수",           val:`${stratShrp}`,
-      sub:`KOSPI200 샤프 ${kpi.sharpe || "N/A"} (${period}) 대비`, ok: stratShrp >= 1.0 },
+    { label:"샤프 지수",               val:`${v3Kpi.sharpe || stratShrp}`,
+      sub:`KOSPI200 샤프 ${kpi.sharpe || "N/A"} (${period}) 대비`, ok: (v3Kpi.sharpe || stratShrp) >= 1.0 },
   ];
 
   const periodBadge = () => {
@@ -841,8 +857,8 @@ export default function TabBacktest({ params, setParams, period, setPeriod, cust
         </div>
       </div>
 
-      {/* ── V3 진화 패널: Phase1 → Phase2 → V3 자산곡선 비교 ── */}
-      <EvolutionPanel />
+      {/* ── V3 vs KOSPI200 Alpha Tracking Panel ── */}
+      <AlphaTrackingPanel period={period} v3Kpi={v3Kpi} kpi={kpi} customRange={customRange} />
 
       {/* ── Python 엔진 전체 매매 기록 + 손익 검증 ── */}
       <TradeVerifyPanel />
@@ -857,16 +873,18 @@ export default function TabBacktest({ params, setParams, period, setPeriod, cust
 // ════════════════════════════════════════════════════════════════════════
 const EVOLUTION_DATA = [{"date":"21-03","kospi":100.0,"p1":107.55,"p2":103.93,"v3":104.29},{"date":"21-04","kospi":101.76,"p1":121.64,"p2":112.59,"v3":112.3},{"date":"21-05","kospi":103.1,"p1":128.92,"p2":116.75,"v3":116.44},{"date":"21-06","kospi":105.73,"p1":169.02,"p2":133.52,"v3":139.24},{"date":"21-07","kospi":102.13,"p1":171.36,"p2":134.79,"v3":140.57},{"date":"21-08","kospi":101.14,"p1":171.36,"p2":134.79,"v3":140.57},{"date":"21-09","kospi":96.69,"p1":171.36,"p2":134.79,"v3":140.57},{"date":"21-10","kospi":93.6,"p1":171.36,"p2":134.79,"v3":140.57},{"date":"21-11","kospi":89.93,"p1":171.36,"p2":134.79,"v3":140.57},{"date":"21-12","kospi":94.98,"p1":171.36,"p2":134.79,"v3":140.57},{"date":"22-01","kospi":86.26,"p1":171.36,"p2":134.79,"v3":140.57},{"date":"22-02","kospi":87.11,"p1":171.36,"p2":134.79,"v3":140.57},{"date":"22-03","kospi":88.09,"p1":171.36,"p2":134.79,"v3":140.57},{"date":"22-04","kospi":85.55,"p1":171.36,"p2":134.79,"v3":140.57},{"date":"22-05","kospi":85.43,"p1":171.36,"p2":134.79,"v3":140.57},{"date":"22-06","kospi":74.01,"p1":171.36,"p2":134.79,"v3":140.57},{"date":"22-07","kospi":77.9,"p1":171.36,"p2":134.79,"v3":140.57},{"date":"22-08","kospi":77.81,"p1":171.36,"p2":134.79,"v3":140.57},{"date":"22-09","kospi":67.79,"p1":171.36,"p2":134.79,"v3":140.57},{"date":"22-10","kospi":72.18,"p1":171.36,"p2":134.79,"v3":140.57},{"date":"22-11","kospi":77.35,"p1":171.36,"p2":134.79,"v3":140.57},{"date":"22-12","kospi":70.13,"p1":171.36,"p2":134.79,"v3":140.57},{"date":"23-01","kospi":76.44,"p1":171.36,"p2":134.79,"v3":140.57},{"date":"23-02","kospi":75.85,"p1":171.36,"p2":134.79,"v3":140.57},{"date":"23-03","kospi":77.59,"p1":162.44,"p2":129.93,"v3":135.5},{"date":"23-04","kospi":78.66,"p1":158.8,"p2":127.95,"v3":133.43},{"date":"23-05","kospi":81.7,"p1":167.56,"p2":134.74,"v3":138.41},{"date":"23-06","kospi":81.43,"p1":175.92,"p2":138.77,"v3":143.16},{"date":"23-07","kospi":83.27,"p1":171.22,"p2":136.19,"v3":140.49},{"date":"23-08","kospi":80.65,"p1":189.53,"p2":146.27,"v3":150.9},{"date":"23-09","kospi":78.72,"p1":189.53,"p2":146.27,"v3":150.9},{"date":"23-10","kospi":73.62,"p1":189.53,"p2":146.27,"v3":150.9},{"date":"23-11","kospi":81.54,"p1":189.53,"p2":146.27,"v3":150.9},{"date":"23-12","kospi":86.26,"p1":188.0,"p2":145.43,"v3":150.03},{"date":"24-01","kospi":81.01,"p1":184.18,"p2":144.55,"v3":147.86},{"date":"24-02","kospi":85.67,"p1":176.78,"p2":139.69,"v3":143.65},{"date":"24-03","kospi":90.26,"p1":172.19,"p2":137.19,"v3":141.04},{"date":"24-04","kospi":87.97,"p1":169.64,"p2":137.18,"v3":139.59},{"date":"24-05","kospi":86.3,"p1":169.64,"p2":137.18,"v3":139.59},{"date":"24-06","kospi":92.52,"p1":173.26,"p2":141.54,"v3":141.65},{"date":"24-07","kospi":91.68,"p1":182.25,"p2":140.68,"v3":146.76},{"date":"24-08","kospi":87.11,"p1":182.25,"p2":140.68,"v3":146.76},{"date":"24-09","kospi":83.07,"p1":182.25,"p2":140.68,"v3":146.76},{"date":"24-10","kospi":81.75,"p1":182.25,"p2":140.68,"v3":146.76},{"date":"24-11","kospi":78.42,"p1":182.25,"p2":140.68,"v3":146.76},{"date":"24-12","kospi":76.58,"p1":182.25,"p2":140.68,"v3":146.76},{"date":"25-01","kospi":80.32,"p1":182.25,"p2":140.68,"v3":146.76},{"date":"25-02","kospi":80.54,"p1":182.25,"p2":140.68,"v3":146.76},{"date":"25-03","kospi":80.09,"p1":182.25,"p2":140.68,"v3":146.76},{"date":"25-04","kospi":81.62,"p1":177.55,"p2":139.42,"v3":144.09},{"date":"25-05","kospi":86.65,"p1":190.53,"p2":141.0,"v3":151.47},{"date":"25-06","kospi":99.89,"p1":222.11,"p2":159.39,"v3":169.42},{"date":"25-07","kospi":105.67,"p1":242.21,"p2":165.48,"v3":180.85},{"date":"25-08","kospi":103.64,"p1":263.6,"p2":176.49,"v3":193.01},{"date":"25-09","kospi":114.21,"p1":261.97,"p2":174.05,"v3":192.08},{"date":"25-10","kospi":139.61,"p1":291.82,"p2":184.07,"v3":209.05},{"date":"25-11","kospi":133.48,"p1":341.07,"p2":202.72,"v3":237.05},{"date":"25-12","kospi":146.01,"p1":330.41,"p2":195.77,"v3":230.99},{"date":"26-01","kospi":185.14,"p1":365.99,"p2":209.87,"v3":251.22},{"date":"26-02","kospi":224.88,"p1":378.88,"p2":207.91,"v3":258.55},{"date":"26-03","kospi":207.81,"p1":364.97,"p2":204.43,"v3":250.64}];
 
-const EVO_KPI = {
-  p1: { label:"Phase 1", sub:"월간 근사 (유령수익)", ret:264.9, mdd:-2.4,  sharpe:1.63, color:"#f87171" },
-  p2: { label:"Phase 2", sub:"일별 엔진 (현실 기저)", ret:104.4, mdd:-6.2,  sharpe:1.01, color:"#fb923c" },
-  v3: { label:"V3 ★",    sub:"Trailing 10% 최적화",  ret:150.6, mdd:-7.5,  sharpe:1.19, color:"#34d399" },
-};
+// ════════════════════════════════════════════════════════════════════════
+// AlphaTrackingPanel — V3 vs KOSPI200 벤치마크 비교 패널
+// Phase1/Phase2 삭제. 진짜 적(지수)과의 Alpha만 표시.
+// ════════════════════════════════════════════════════════════════════════
 
-const EvoTooltip = ({ active, payload, label }) => {
+const AlphaTooltip = ({ active, payload, label }) => {
   if (!active || !payload?.length) return null;
+  const v3p   = payload.find(p => p.dataKey === "v3");
+  const kp    = payload.find(p => p.dataKey === "kospi");
+  const alpha = v3p && kp ? +(v3p.value - kp.value).toFixed(1) : 0;
   return (
-    <div className="bg-slate-900 border border-slate-600 rounded-xl p-3 shadow-2xl text-xs min-w-[200px]">
+    <div className="bg-slate-900 border border-slate-600 rounded-xl p-3 shadow-2xl text-xs min-w-[170px]">
       <p className="text-slate-400 font-semibold mb-2 border-b border-slate-700 pb-1">📅 20{label}</p>
       {payload.map(p => {
         const chg = +(p.value - 100).toFixed(1);
@@ -882,121 +900,161 @@ const EvoTooltip = ({ active, payload, label }) => {
           </div>
         );
       })}
+      <div className={`flex justify-between gap-3 mt-1 pt-1 border-t border-slate-700 font-bold ${alpha >= 0 ? "text-emerald-400" : "text-amber-400"}`}>
+        <span>Alpha</span><span>{alpha >= 0 ? "+" : ""}{alpha}%p</span>
+      </div>
     </div>
   );
 };
 
-function EvolutionPanel() {
+function AlphaTrackingPanel({ period, v3Kpi, kpi, customRange }) {
+  // 기간별 EVOLUTION_DATA 슬라이스 + base=100 재정규화
+  const periodStart = KPI_BY_PERIOD[period]?.start ?? "21-03";
+  const raw = period === "커스텀" && customRange?.start
+    ? EVOLUTION_DATA.filter(d => d.date >= customRange.start.slice(0, 5) && d.date <= (customRange.end ?? "99-99").slice(0, 5))
+    : EVOLUTION_DATA.filter(d => d.date >= periodStart);
+  const base = raw[0] ?? { v3: 100, kospi: 100 };
+  const chartData = raw.map(d => ({
+    date: d.date,
+    v3:    +(d.v3    / base.v3    * 100).toFixed(2),
+    kospi: +(d.kospi / base.kospi * 100).toFixed(2),
+  }));
+
+  const last      = chartData[chartData.length - 1] ?? { v3: 100, kospi: 100 };
+  const v3Ret     = +(last.v3    - 100).toFixed(1);
+  const kospiRet  = +(last.kospi - 100).toFixed(1);
+  const alphaPct  = +(v3Ret - kospiRet).toFixed(1);
+  const mddV3     = v3Kpi?.mdd    ?? -7.5;
+  const mddKospi  = kpi?.mdd      ?? -35.9;
+  const annV3     = v3Kpi?.annRet ?? 0;
+  const annKospi  = kpi?.annRet   ?? 0;
+  const calmarV3     = mddV3    !== 0 ? Math.abs(+(annV3    / Math.abs(mddV3)   ).toFixed(2)) : 0;
+  const calmarKospi  = mddKospi !== 0 ? Math.abs(+(annKospi / Math.abs(mddKospi)).toFixed(2)) : 0;
+  const beatMarket   = v3Ret > kospiRet;
+
+  // Alpha 구간(V3 > KOSPI) 음영 구간 계산
+  const alphaZones = [];
+  let zStart = null;
+  chartData.forEach((d, i) => {
+    if (d.v3 > d.kospi && zStart === null) zStart = d.date;
+    if (d.v3 <= d.kospi && zStart !== null) {
+      alphaZones.push({ x1: zStart, x2: chartData[i - 1]?.date ?? d.date });
+      zStart = null;
+    }
+  });
+  if (zStart) alphaZones.push({ x1: zStart, x2: chartData[chartData.length - 1]?.date });
+
   return (
     <div className="bg-slate-800/60 rounded-2xl p-5 border border-slate-700 mt-4">
       {/* 헤더 */}
-      <div className="flex items-center gap-3 mb-1">
-        <span className="text-lg">🧬</span>
-        <p className="text-sm font-bold text-slate-100">전략 진화 (Evolution)</p>
-        <span className="text-[10px] bg-emerald-900/50 text-emerald-300 px-2 py-0.5 rounded-full border border-emerald-700/40">
-          V3 정합성 완료 2026-03-28
+      <div className="flex items-center gap-3 mb-4 flex-wrap">
+        <span className="text-lg">📊</span>
+        <p className="text-sm font-bold text-slate-100">V3 vs KOSPI200 벤치마크</p>
+        <span className={`text-[10px] px-2 py-0.5 rounded-full border font-bold ${
+          beatMarket
+            ? "bg-emerald-900/50 text-emerald-300 border-emerald-700/40"
+            : "bg-amber-900/50 text-amber-300 border-amber-700/40"
+        }`}>
+          {beatMarket ? "✅ Beat the Market" : "⚠️ 지수 추격 중"}
         </span>
+        <span className="text-[10px] text-slate-500 ml-auto">{period} 기준 · Python 엔진 실측</span>
       </div>
-      <p className="text-[11px] text-slate-500 mb-4 ml-7">
-        유령수익 제거 → 현실 직시 → 최적화로 복원한 진짜 엣지의 서사
-      </p>
 
-      {/* KPI 비교 카드 3개 */}
+      {/* 비교 카드 3개 */}
       <div className="grid grid-cols-3 gap-3 mb-4">
-        {Object.entries(EVO_KPI).map(([key, k]) => (
-          <div key={key}
-            className={`rounded-xl p-3 border ${
-              key === "v3"
-                ? "bg-emerald-950/40 border-emerald-700/50"
-                : "bg-slate-900/50 border-slate-700/50"
-            }`}
-          >
-            <div className="flex items-center gap-1.5 mb-2">
-              <div className="w-2.5 h-2.5 rounded-full" style={{ background: k.color }} />
-              <span className="text-xs font-bold text-slate-200">{k.label}</span>
-            </div>
-            <p className="text-[10px] text-slate-500 mb-2">{k.sub}</p>
-            <div className="space-y-1">
-              <div className="flex justify-between text-[11px]">
-                <span className="text-slate-500">5년 누적</span>
-                <span className="font-bold" style={{ color: k.color }}>+{k.ret}%</span>
-              </div>
-              <div className="flex justify-between text-[11px]">
-                <span className="text-slate-500">MDD</span>
-                <span className="font-semibold text-red-400">{k.mdd}%</span>
-              </div>
-              <div className="flex justify-between text-[11px]">
-                <span className="text-slate-500">샤프</span>
-                <span className="font-semibold text-slate-300">{k.sharpe}</span>
-              </div>
-            </div>
-            {key === "v3" && (
-              <div className="mt-2 pt-2 border-t border-emerald-700/30">
-                <p className="text-[10px] text-emerald-400 font-semibold">
-                  Trailing 10.0% · ATR 1.6x · 칼마 2.64
-                </p>
-              </div>
-            )}
-            {key === "p1" && (
-              <div className="mt-2 pt-2 border-t border-slate-700/30">
-                <p className="text-[10px] text-red-400/70">
-                  ⚠ 월간 근사 — 유령수익 포함
-                </p>
-              </div>
-            )}
+        {/* V3 카드 */}
+        <div className="bg-emerald-950/40 rounded-xl p-3 border border-emerald-700/50">
+          <div className="flex items-center gap-1.5 mb-2">
+            <div className="w-2.5 h-2.5 rounded-full bg-emerald-400" />
+            <span className="text-xs font-bold text-slate-200">SmartSwing V3</span>
           </div>
-        ))}
+          <div className="space-y-1 text-[11px]">
+            <div className="flex justify-between">
+              <span className="text-slate-500">누적수익</span>
+              <span className="text-emerald-400 font-bold">{v3Ret >= 0 ? "+" : ""}{v3Ret}%</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-500">MDD</span>
+              <span className="text-red-400 font-semibold">{mddV3}%</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-500">Calmar</span>
+              <span className="text-emerald-300 font-semibold">{calmarV3}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Alpha 카드 */}
+        <div className={`rounded-xl p-3 border text-center ${
+          beatMarket ? "bg-emerald-900/30 border-emerald-600/50" : "bg-amber-900/20 border-amber-600/50"
+        }`}>
+          <p className="text-[10px] text-slate-500 mb-1">초과수익 Alpha</p>
+          <p className={`text-2xl font-black ${beatMarket ? "text-emerald-400" : "text-amber-400"}`}>
+            {alphaPct >= 0 ? "+" : ""}{alphaPct}%p
+          </p>
+          <p className="text-[10px] text-slate-500 mt-2">MDD 방어율</p>
+          <p className="text-base font-bold text-emerald-300">
+            {mddKospi !== 0 ? (Math.abs(mddV3) / Math.abs(mddKospi) * 100).toFixed(0) : 0}%
+          </p>
+          <p className="text-[9px] text-slate-600">KOSPI 낙폭 대비</p>
+        </div>
+
+        {/* KOSPI200 카드 */}
+        <div className="bg-slate-900/50 rounded-xl p-3 border border-slate-700/50">
+          <div className="flex items-center gap-1.5 mb-2">
+            <div className="w-2.5 h-2.5 rounded-full bg-slate-400" />
+            <span className="text-xs font-bold text-slate-400">KOSPI200 B&H</span>
+          </div>
+          <div className="space-y-1 text-[11px]">
+            <div className="flex justify-between">
+              <span className="text-slate-500">누적수익</span>
+              <span className="text-slate-300 font-bold">{kospiRet >= 0 ? "+" : ""}{kospiRet}%</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-500">MDD</span>
+              <span className="text-red-400 font-semibold">{mddKospi}%</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-500">Calmar</span>
+              <span className="text-slate-300 font-semibold">{calmarKospi}</span>
+            </div>
+          </div>
+        </div>
       </div>
 
-      {/* 3곡선 + KOSPI200 차트 */}
-      <ResponsiveContainer width="100%" height={260}>
-        <LineChart data={EVOLUTION_DATA} margin={{ top:16, right:8, bottom:4, left:-24 }}>
+      {/* V3 vs KOSPI200 2선 차트 */}
+      <ResponsiveContainer width="100%" height={240}>
+        <LineChart data={chartData} margin={{ top:16, right:8, bottom:4, left:-24 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
           <XAxis dataKey="date" tick={{ fill:"#475569", fontSize:9 }}
-            interval={Math.max(1, Math.floor(EVOLUTION_DATA.length / 9))} />
+            interval={Math.max(1, Math.floor(chartData.length / 9))} />
           <YAxis tick={{ fill:"#475569", fontSize:9 }} domain={["auto","auto"]} />
-          <Tooltip content={<EvoTooltip />} />
+          <Tooltip content={<AlphaTooltip />} />
           <ReferenceLine y={100} stroke="#334155" strokeDasharray="4 2" />
-          <Line type="monotone" dataKey="p1" name="Phase1" stroke="#f87171"
-            strokeWidth={1.5} strokeDasharray="5 3" dot={false} />
-          <Line type="monotone" dataKey="p2" name="Phase2" stroke="#fb923c"
-            strokeWidth={1.5} strokeDasharray="4 2" dot={false} />
+          {alphaZones.map((z, i) => (
+            <ReferenceArea key={i} x1={z.x1} x2={z.x2} fill="#34d399" fillOpacity={0.08} />
+          ))}
           <Line type="monotone" dataKey="v3" name="V3★" stroke="#34d399"
             strokeWidth={2.5} dot={false} activeDot={{ r:5, fill:"#34d399" }} />
-          <Line type="monotone" dataKey="kospi" name="KOSPI200" stroke="#475569"
-            strokeWidth={1.5} strokeDasharray="2 2" dot={false} />
+          <Line type="monotone" dataKey="kospi" name="KOSPI200" stroke="#64748b"
+            strokeWidth={1.5} strokeDasharray="4 2" dot={false} />
         </LineChart>
       </ResponsiveContainer>
 
       {/* 범례 */}
-      <div className="flex flex-wrap gap-4 mt-3 text-[10px] text-slate-500">
-        {[
-          { color:"#f87171", label:"Phase 1 — 월간 근사 (유령수익)", dash:true },
-          { color:"#fb923c", label:"Phase 2 — 일별 엔진 (현실 기저)", dash:true },
-          { color:"#34d399", label:"V3 ★ — Trailing 10.0% 최적화 확정값", dash:false },
-          { color:"#475569", label:"KOSPI200 벤치마크", dash:true },
-        ].map(item => (
-          <div key={item.label} className="flex items-center gap-1.5">
-            <svg width="20" height="8">
-              <line x1="0" y1="4" x2="20" y2="4"
-                stroke={item.color} strokeWidth={item.dash ? 1.5 : 2.5}
-                strokeDasharray={item.dash ? "4 2" : "none"} />
-            </svg>
-            <span>{item.label}</span>
-          </div>
-        ))}
-      </div>
-
-      {/* 인사이트 */}
-      <div className="mt-3 bg-slate-900/40 rounded-lg p-3 border border-slate-700/30">
-        <p className="text-[11px] text-slate-400 leading-relaxed">
-          <span className="text-emerald-400 font-semibold">핵심 인사이트: </span>
-          2022년 하락장에서 세 전략 모두 거래 0건 (L1 Shield 차단).
-          Phase1의 +264.9%는 월간 근사 엔진의 과대평가로 인한 유령수익.
-          Phase2에서 현실 기저값 +104.4%로 조정 후, 64조합 그리드 탐색으로
-          <span className="text-emerald-400 font-semibold"> V3 +150.6% / MDD -7.5%</span> 복원.
-          현실의 숫자 위에서 찾아낸 엣지만이 실전에서 살아남는다.
-        </p>
+      <div className="flex flex-wrap gap-5 mt-3 text-[10px] text-slate-500">
+        <div className="flex items-center gap-1.5">
+          <svg width="20" height="8"><line x1="0" y1="4" x2="20" y2="4" stroke="#34d399" strokeWidth="2.5"/></svg>
+          <span className="text-emerald-400 font-semibold">V3 ★ SmartSwing (Python 실측)</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <svg width="20" height="8"><line x1="0" y1="4" x2="20" y2="4" stroke="#64748b" strokeWidth="1.5" strokeDasharray="4 2"/></svg>
+          <span>KOSPI200 Buy &amp; Hold</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <div className="w-4 h-3 rounded" style={{ background:"rgba(52,211,153,0.15)", border:"1px solid rgba(52,211,153,0.3)" }}/>
+          <span className="text-emerald-600/80">Alpha 구간 (V3 &gt; KOSPI)</span>
+        </div>
       </div>
     </div>
   );
