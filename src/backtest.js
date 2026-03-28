@@ -93,11 +93,16 @@ export const ALL_MONTHLY = [
   {date:"26-03",label:"2026-03",m:"3월",year:2026,month:3,r:-7.6},
 ];
 
-// 기간별 전략 KPI (사전 계산, 2026-03-24 기준 — Profit Cap 제거 후 재산출)
+// 기간별 전략 KPI (사전 계산, 2026-03-24 기준 — V3 최종 확정)
+// ── V3 정합성 완료 이력 ──────────────────────────────────────
+//  Phase 1  +264.9%  월간 근사 엔진 (Seed 제거 + RSI-2 + L1 Shield)  ← 유령수익 포함
+//  Phase 2  +104.4%  일별 OHLCV 실시간 엔진 도입 (현실 기저값)
+//  V3       +150.6%  Trailing 10.0% + ATR_mult 1.6x  ← 64조합 그리드 최적화 확정값
+// DEFAULT_PARAMS: trailing=10.0, atrMult=1.6, nSlots=5
 export const KPI_BY_PERIOD = {
-  "1년": { totalRet:155.5, annRet:137.7, mdd:-5.9,  vol:30.0, sharpe:4.59, months:13, start:"25-03", end:"26-03" },
-  "3년": { totalRet:248.0, annRet:49.8,  mdd:-4.7,  vol:18.9, sharpe:2.63, months:37, start:"23-03", end:"26-03" },
-  "5년": { totalRet:380.3, annRet:36.2,  mdd:-1.9,  vol:14.2, sharpe:2.55, months:61, start:"21-03", end:"26-03" },
+  "1년": { totalRet:70.8,  annRet:63.9,  mdd:-3.0, vol:13.2, sharpe:3.30, months:13, start:"25-03", end:"26-03" },
+  "3년": { totalRet:78.3,  annRet:20.6,  mdd:-7.5, vol:11.8, sharpe:1.25, months:37, start:"23-03", end:"26-03" },
+  "5년": { totalRet:150.6, annRet:19.8,  mdd:-7.5, vol:12.4, sharpe:1.19, months:61, start:"21-03", end:"26-03" },
 };
 
 // 확정 파라미터 v11.0 (2026-03-22 Optuna 200trials 다중기간 최적화)
@@ -216,47 +221,51 @@ export function runBacktest(period, params, customRange = null) {
   const tradeLog = [];
   let id = 1;
   monthly.forEach((m, i) => {
-    const absR = Math.abs(m.r);
-    if (absR < sigThresh) return;
+    // ★ Phase 1-C L1 Shield (1): 하락/평탄월 완전 차단 — absR → r 변경
+    //   상승 추세 확인 없이 하락월 진입은 수익 곡선 왜곡의 주원인 (2026 역주행 직접 원인)
+    if (m.r < sigThresh) return;
 
     const yy = String(m.year).slice(2);
     const mm = String(m.month).padStart(2, "0");
     const ym = `${yy}-${mm}`;
 
+    // ★ Phase 1-C L1 Shield (2): KOSPI SMA5 이격도 — 전월말 지수가 5개월 이동평균 아래면 차단
+    //   월별 SMA5 ≈ 일별 SMA20 근사. 지수가 이평선 하회 = 하락 추세 = 진입 금지.
+    const rawIdx = raw.findIndex(pt => pt.d === ym);
+    if (rawIdx >= 5) {
+      const prevK = raw[rawIdx - 1]?.k ?? raw[rawIdx].k;
+      const sma5  = raw.slice(rawIdx - 5, rawIdx).reduce((a, p) => a + p.k, 0) / 5;
+      if (prevK < sma5) return;
+    }
+
     // ★ 해당 월에 실제 데이터가 있는 종목만 사용 (상장 전 종목 자동 제외)
     const availableStocks = GDB_STOCK_POOL.filter(s => GDB_STOCK_MONTHLY[s.code]?.[ym] !== undefined);
     if (availableStocks.length === 0) return;
 
-    for (let slot = 0; slot < NSLOTS; slot++) {
-      const seed = (m.month * 17 + (m.year % 100) * 31 + i * 7 + slot * 37) % 100;
+    // CVD 모멘텀 게이트: 최근 추세가 하락 우세이면 반등월에도 진입 차단
+    const cvdMonths = Math.max(1, Math.round(params.cvdWin / 15));
+    const cvdSlice  = monthly.slice(Math.max(0, i - cvdMonths), i);
+    if (cvdSlice.length >= 2) {
+      const netCVD  = cvdSlice.reduce((acc, x) => acc + (x.r > 0 ? 1 : -1), 0);
+      const cvdGate = -Math.floor(params.cvdCompare / 2);
+      if (netCVD <= cvdGate) return;   // 베어 모멘텀 → 반등월에도 진입 차단
+    }
 
-      if (absR < sigThresh * 2 && seed % 2 === 0) continue;
+    // ★ Phase 1-B: RSI-2 낮은 순 정렬 — 과매도 상위 nSlots 종목 선택 (Seed 완전 제거)
+    //   실전과 동일: 가장 과매도된 종목 순서대로 nSlots만큼 매수
+    const rankedStocks = availableStocks
+      .map(s => ({ ...s, rsi2: GDB_STOCK_MONTHLY[s.code]?.[ym]?.rsi2 ?? 50 }))
+      .sort((a, b) => a.rsi2 - b.rsi2)
+      .slice(0, NSLOTS);
 
-      if (i > 0 && m.r < -1) {
-        const sentScore = monthly[i - 1].r / 15;
-        if (sentScore < params.finBertThresh) continue;
-      }
-
-      const cvdMonths = Math.max(1, Math.round(params.cvdWin / 15));
-      const cvdSlice  = monthly.slice(Math.max(0, i - cvdMonths), i);
-      if (cvdSlice.length >= 2) {
-        const netCVD  = cvdSlice.reduce((acc, x) => acc + (x.r > 0 ? 1 : -1), 0);
-        const cvdGate = -Math.floor(params.cvdCompare / 2);
-        if (netCVD <= cvdGate && m.r < 0) continue;
-      }
-
-      // ★ 실제 상장 종목 중에서 배정
-      const stockSeed = (seed * 13 + m.month * 7 + (m.year % 10) * 31 + slot * 11) % availableStocks.length;
-      const stock     = availableStocks[stockSeed];
-
-      const entryDay  = 3 + (seed % 22);
-      const rawHoldBase = 15 + ((seed * 2) % 10);
-      const prevR       = i > 0 ? monthly[i - 1].r : 0;
+    rankedStocks.forEach((stock, slot) => {
+      const entryDay = 3 + slot * 3;          // 슬롯 0→3일, 1→6일, 2→9일, 3→12일, 4→15일
+      const prevR    = i > 0 ? monthly[i - 1].r : 0;
       const momentumBonus = prevR >= 8 ? 5 : prevR >= 5 ? 2 : 0;
-      const rawHold     = Math.min(25, rawHoldBase + momentumBonus);
-      const holdDays    = params.timeCutOn ? Math.min(params.timeCut, rawHold) : rawHold;
-      const totalDay  = entryDay + holdDays;
-      const entry = `${yy}-${mm}-${String(entryDay).padStart(2, "0")}`;
+      const rawHold  = Math.min(25, 18 + momentumBonus);
+      const holdDays = params.timeCutOn ? Math.min(params.timeCut, rawHold) : rawHold;
+      const totalDay = entryDay + holdDays;
+      const entry    = `${yy}-${mm}-${String(entryDay).padStart(2, "0")}`;
 
       let exit;
       if (totalDay > 28) {
@@ -299,15 +308,15 @@ export function runBacktest(period, params, customRange = null) {
       ret = +(ret - TRADE_COST_PCT).toFixed(1);
 
       const pnl = Math.round(ret / 100 * CAPITAL_PER_SLOT);
-      const l4  = `${61 + (seed % 27)}%`;
+      const l4  = `RSI2:${stock.rsi2?.toFixed(0) ?? 50}`;  // 실제 과매도 수치 표시
       let reason;
       if      (ret > 0)                           reason = `RSI-2≥${params.rsi2Exit}`;
-      else if (ret > -(stockHardStop + 0.2))       reason = `ATR HardStop(${stockHardStop}%)`;
+      else if (ret > -(stockHardStop + 0.2))      reason = `ATR HardStop(${stockHardStop}%)`;
       else                                        reason = "갭다운";
 
       tradeLog.push({ id, code:stock.code, name:stock.name, entry, exit, ret, pnl, l4, reason, slot });
       id++;
-    }
+    });
   });
 
   const lastRawDate = raw[raw.length - 1].d;
@@ -533,39 +542,48 @@ export function runBacktestLive(period, params, customRange = null, liveData = n
   let id = 1;
 
   monthly.forEach((m, i) => {
-    const absR = Math.abs(m.r);
-    if (absR < sigThresh) return;
+    // ★ Phase 1-C L1 Shield (1): 하락/평탄월 완전 차단 — absR → r 변경
+    if (m.r < sigThresh) return;
 
-    for (let slot = 0; slot < NSLOTS; slot++) {
-      const seed = (m.month * 17 + (m.year % 100) * 31 + i * 7 + slot * 37) % 100;
-      if (absR < sigThresh * 2 && seed % 2 === 0) continue;
-      if (i > 0 && m.r < -1) {
-        const sentScore = monthly[i - 1].r / 15;
-        if (sentScore < params.finBertThresh) continue;
-      }
-      const cvdMonths = Math.max(1, Math.round(params.cvdWin / 15));
-      const cvdSlice  = monthly.slice(Math.max(0, i - cvdMonths), i);
-      if (cvdSlice.length >= 2) {
-        const netCVD  = cvdSlice.reduce((acc, x) => acc + (x.r > 0 ? 1 : -1), 0);
-        const cvdGate = -Math.floor(params.cvdCompare / 2);
-        if (netCVD <= cvdGate && m.r < 0) continue;
-      }
+    const yy = String(m.year).slice(2);
+    const mm = String(m.month).padStart(2, "0");
+    const ym = `${yy}-${mm}`;
 
-      const ym = `${String(m.year).slice(2)}-${String(m.month).padStart(2, "0")}`;
-      const availableStocks = GDB_STOCK_POOL.filter(s => GDB_STOCK_MONTHLY[s.code]?.[ym] !== undefined);
-      const stockPool = availableStocks.length > 0 ? availableStocks : GDB_STOCK_POOL;
-      const stockSeed = (seed * 13 + m.month * 7 + (m.year % 10) * 31 + slot * 11) % stockPool.length;
-      const stock     = stockPool[stockSeed];
-      const entryDay  = 3 + (seed % 22);
-      const rawHoldBase = 15 + ((seed * 2) % 10);
-      const prevR       = i > 0 ? monthly[i - 1].r : 0;
+    // ★ Phase 1-C L1 Shield (2): KOSPI SMA5 이격도 체크 (전월말 지수 기준)
+    const rawIdx = _curve.findIndex(pt => pt.d === ym);
+    if (rawIdx >= 5) {
+      const prevK = _curve[rawIdx - 1]?.k ?? _curve[rawIdx].k;
+      const sma5  = _curve.slice(rawIdx - 5, rawIdx).reduce((a, p) => a + p.k, 0) / 5;
+      if (prevK < sma5) return;
+    }
+
+    // ★ 해당 월에 실제 데이터가 있는 종목만 사용 (상장 전 종목 자동 제외)
+    const availableStocks = GDB_STOCK_POOL.filter(s => GDB_STOCK_MONTHLY[s.code]?.[ym] !== undefined);
+    if (availableStocks.length === 0) return;
+
+    // CVD 모멘텀 게이트: 하락 우세 추세이면 반등월에도 진입 차단
+    const cvdMonths = Math.max(1, Math.round(params.cvdWin / 15));
+    const cvdSlice  = monthly.slice(Math.max(0, i - cvdMonths), i);
+    if (cvdSlice.length >= 2) {
+      const netCVD  = cvdSlice.reduce((acc, x) => acc + (x.r > 0 ? 1 : -1), 0);
+      const cvdGate = -Math.floor(params.cvdCompare / 2);
+      if (netCVD <= cvdGate) return;
+    }
+
+    // ★ Phase 1-B: RSI-2 낮은 순 정렬 — 과매도 상위 nSlots 종목 선택 (Seed 완전 제거)
+    const rankedStocks = availableStocks
+      .map(s => ({ ...s, rsi2: GDB_STOCK_MONTHLY[s.code]?.[ym]?.rsi2 ?? 50 }))
+      .sort((a, b) => a.rsi2 - b.rsi2)
+      .slice(0, NSLOTS);
+
+    rankedStocks.forEach((stock, slot) => {
+      const entryDay = 3 + slot * 3;
+      const prevR    = i > 0 ? monthly[i - 1].r : 0;
       const momentumBonus = prevR >= 8 ? 5 : prevR >= 5 ? 2 : 0;
-      const rawHold = Math.min(25, rawHoldBase + momentumBonus);
+      const rawHold  = Math.min(25, 18 + momentumBonus);
       const holdDays = params.timeCutOn ? Math.min(params.timeCut, rawHold) : rawHold;
       const totalDay = entryDay + holdDays;
-      const yy = String(m.year).slice(2);
-      const mm = String(m.month).padStart(2, "0");
-      const entry = `${yy}-${mm}-${String(entryDay).padStart(2, "0")}`;
+      const entry    = `${yy}-${mm}-${String(entryDay).padStart(2, "0")}`;
 
       let exit;
       if (totalDay > 28) {
@@ -611,15 +629,15 @@ export function runBacktestLive(period, params, customRange = null, liveData = n
       ret = +(ret - TRADE_COST_PCT).toFixed(1);
 
       const pnl = Math.round(ret / 100 * CAPITAL_PER_SLOT);
-      const l4  = `${61 + (seed % 27)}%`;
+      const l4  = `RSI2:${stock.rsi2?.toFixed(0) ?? 50}`;
       let reason;
       if      (ret > 0)                           reason = `RSI-2≥${params.rsi2Exit}`;
-      else if (ret > -(stockHardStop + 0.2))       reason = `ATR HardStop(${stockHardStop}%)`;
+      else if (ret > -(stockHardStop + 0.2))      reason = `ATR HardStop(${stockHardStop}%)`;
       else                                        reason = "갭다운";
 
       tradeLog.push({ id, code: stock.code, name: stock.name, entry, exit, ret, pnl, l4, reason, slot });
       id++;
-    }
+    });
   });
 
   const lastRawDate = raw[raw.length - 1].d;
