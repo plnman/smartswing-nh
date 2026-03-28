@@ -78,7 +78,7 @@ export default function TabStrategy({ params, setParams, setTab, period, validat
         `⚙️ 현재 파라미터 (v11.0 기반)`,
         `• ADX: ${params.adx} | RSI-2 진입: ${params.rsi2Entry}`,
         `• Trailing: ${params.trailing} | Hard Stop: ${params.hardStop}%`,
-        `• ATR배수: ${params.atrMult} | ML임계: ${params.mlThresh}%`,
+        `• ATR배수: ${params.atrMult} | L4 슬롯반감 기준: sigThresh×2=${((Math.max(0.8,(params.adx-20)*0.15)*Math.max(0.6,params.zscore*0.35))*2).toFixed(3)}%`,
         ``,
         `📊 5년 백테스트 결과`,
         `• 전략: +${strat5y}% | KOSPI B&H: +${bh5y}%`,
@@ -239,17 +239,32 @@ export default function TabStrategy({ params, setParams, setTab, period, validat
             pk="cvdCompare" setParams={ps}/>
         </div>
 
-        {/* ── L4 약한 모멘텀 슬롯 조정 */}
+        {/* ── L4 약한 모멘텀 슬롯 반감 (V3 자동 계산, 파라미터 없음) */}
         <div className="bg-slate-800 rounded-xl p-4 border border-slate-700">
           <div className="flex items-center gap-2 mb-3">
             <span className="px-2 py-0.5 bg-purple-900 text-purple-200 rounded text-xs font-bold">L4</span>
-            <p className="text-xs font-bold text-slate-300">약한 모멘텀 조정</p>
-            <span className="ml-auto text-[9px] px-1.5 py-0.5 bg-purple-900/60 text-purple-300 rounded">백테스팅 동일</span>
+            <p className="text-xs font-bold text-slate-300">약한 모멘텀 슬롯 반감</p>
+            <span className="ml-auto text-[9px] px-1.5 py-0.5 bg-emerald-900/60 text-emerald-300 rounded border border-emerald-700/50">✅ 실전 작동</span>
           </div>
-          <ParamSlider label="mlThresh (슬롯 조정)" val={params.mlThresh} min={55} max={80} step={5} unit="" pk="mlThresh" setParams={ps}/>
-          <div className="p-2 bg-purple-900/20 rounded-lg border border-purple-800/40 text-[10px] text-purple-300 mb-2">
-            <span className="font-bold">[v3]</span> |KOSPI| &lt; sigThresh×2 (약한 모멘텀) 시 유효 슬롯 = nSlots÷2<br/>
-            mlThresh={params.mlThresh} → mlPassMax={100-(params.mlThresh-55)} → {Math.round((100-(params.mlThresh-55))/100*100)}% 거래 허용
+          <div className="p-3 bg-purple-900/20 rounded-lg border border-purple-800/40 text-[10px] text-purple-200 space-y-1.5">
+            <div className="font-bold text-purple-300 mb-1">[V3 실제 동작] — 조정 파라미터 없음, 자동 계산</div>
+            <div className="flex justify-between items-center">
+              <span className="text-slate-400">발동 조건</span>
+              <span className="font-mono text-slate-200">|KOSPI 당월 수익률| &lt; sigThresh × 2</span>
+            </div>
+            <div className="flex justify-between items-center">
+              <span className="text-slate-400">현재 기준값</span>
+              <span className="font-mono text-purple-300">
+                sigThresh {(Math.max(0.8,(params.adx-20)*0.15)*Math.max(0.6,params.zscore*0.35)).toFixed(3)} × 2 = <span className="text-amber-300">{((Math.max(0.8,(params.adx-20)*0.15)*Math.max(0.6,params.zscore*0.35))*2).toFixed(3)}%</span>
+              </span>
+            </div>
+            <div className="flex justify-between items-center">
+              <span className="text-slate-400">발동 시 슬롯</span>
+              <span className="font-mono text-amber-300">{params.nSlots}종목 → {Math.max(1,Math.floor(params.nSlots/2))}종목 (nSlots ÷ 2)</span>
+            </div>
+            <p className="text-[9px] text-slate-500 pt-1.5 border-t border-purple-800/30">
+              ★ ADX · zscore 변경 시 sigThresh가 연동되어 기준값 자동 재계산
+            </p>
           </div>
         </div>
       </div>
@@ -320,23 +335,36 @@ export default function TabStrategy({ params, setParams, setTab, period, validat
             </p>
           </div>
 
-          {/* 컬럼 2: Trailing */}
+          {/* 컬럼 2: Trailing — 실전 전용 */}
           <div>
+            <div className="mb-2 px-2 py-1 bg-amber-900/20 border border-amber-700/40 rounded-lg text-[9px] text-amber-400 flex items-center gap-1">
+              <span>⚡</span> 실전 전용 — 백테스트 수치에 미반영
+              <span className="text-slate-500 ml-1">(월별 종가 기준 시뮬 한계)</span>
+            </div>
             <ParamSlider label="Trailing 활성 기준" val={+(params.hardStop * 1.4).toFixed(1)}
               min={2} max={10} step={0.5} unit="%"
               reason={`Hard Stop(${params.hardStop}%) × 1.4 자동 산출 — 별도 조정 불가`}
               setParams={ps}/>
             <ParamSlider label="Trailing 폭" val={params.trailing} min={1} max={5} step={0.5} unit="%" pk="trailing" setParams={ps}
-              note="고점 대비 이 % 하락 시 청산"/>
+              note="고점 대비 이 % 하락 시 telegram_alert.py 청산 신호"/>
           </div>
 
           {/* 컬럼 3: RSI */}
           <div>
             <ParamSlider label="RSI-2 즉시 청산 (≥)" val={params.rsi2Exit} min={80} max={99} step={5} unit="" pk="rsi2Exit" setParams={ps}
               note="과매수 도달 → 즉시 전량 매도"/>
-            <ParamSlider label="RSI-14 분할매도 (≥)" val={70} min={60} max={85} step={5} unit=""
-              reason="개별 종목 모멘텀 연동 미구현 — 현재 고정값 70 사용"
-              setParams={ps}/>
+            {/* RSI-14 분할매도: V3 미구현, 고정값 */}
+            <div className="mb-3 opacity-50">
+              <div className="flex justify-between mb-1">
+                <span className="text-xs text-slate-300">RSI-14 분할매도 (≥)</span>
+                <span className="text-xs font-bold text-slate-500">70 (고정)</span>
+              </div>
+              <input type="range" min={60} max={85} step={5} defaultValue={70} disabled
+                className="w-full h-1.5 accent-indigo-500 bg-slate-700 rounded-full cursor-not-allowed"/>
+              <p className="text-[9px] text-amber-600/80 mt-0.5 flex items-center gap-1">
+                <span>⚠</span>V3 미구현 — 개별 종목 연동 없이 고정값 70 적용 중
+              </p>
+            </div>
           </div>
         </div>
 
@@ -381,8 +409,8 @@ export default function TabStrategy({ params, setParams, setTab, period, validat
             { name:"ADX(14)", calc:"EWM 14일 — 60 거래일 데이터 기반", setting:`≥ ${params.adx} (L2 추세 강도 확인)`, active:true },
             { name:"ATR(14)", calc:"True Range EWM 14일", setting:`hardStop=${params.hardStop}% 손절 기준 (알림 표시용)`, active:true },
             { name:"SMA20 이격도", calc:"종가 / 20일 이동평균", setting:"≥ 97% 기준 — 현재 UI 표시 전용, 신호에 미반영", active:false },
-            { name:"약한 모멘텀 슬롯", calc:"|KOSPI당월| < sigThresh×2 시 슬롯 절반", setting:`mlThresh=${params.mlThresh} → 슬롯 ${params.nSlots} → ${Math.max(1,Math.floor(params.nSlots/2))}`, active:true },
-            { name:"Trailing Stop", calc:"고점 대비 하락폭 추적", setting:`${params.trailing}% 하락 시 청산`, active:true },
+            { name:"약한 모멘텀 슬롯 (L4)", calc:`|KOSPI당월| < sigThresh×2 = ${((Math.max(0.8,(params.adx-20)*0.15)*Math.max(0.6,params.zscore*0.35))*2).toFixed(3)}% 시 자동 발동`, setting:`슬롯 ${params.nSlots}종목 → ${Math.max(1,Math.floor(params.nSlots/2))}종목 (nSlots÷2 고정)`, active:true },
+            { name:"Trailing Stop", calc:"고점 대비 하락폭 추적 — 실전 전용", setting:`${params.trailing}% 하락 시 청산 (telegram_alert.py) · 백테스트 미반영`, active:true },
             { name:"Time-Cut", calc:"보유 거래일 카운터", setting:params.timeCutOn ? `${params.timeCut}거래일 초과 시 강제 청산` : "현재 OFF", active:params.timeCutOn },
           ].map(ind => (
             <div key={ind.name} className={`flex gap-2 p-2 rounded-lg border ${
