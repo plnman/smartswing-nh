@@ -108,7 +108,7 @@ export const KPI_BY_PERIOD = {
 // 확정 파라미터 v11.0 (2026-03-22 Optuna 200trials 다중기간 최적화)
 // 상승장(25-03~26-03) +156% / 하락장(22-01~24-12) +67% / 5년 +387% MDD -1.8%
 export const DEFAULT_PARAMS = {
-  adx:20, rsi2Entry:15, zscore:1.0,
+  adx:20, rsi2Entry:25, zscore:1.0,  // ★ Q3-A: rsi2Entry 15→25 완화 (삼성전자 등 강세주 진입 개선)
   nSlots:5,
   // hardStop: DEFAULT_PARAMS에 존재하지만 runBacktest에서 직접 미사용.
   // 실제 적용: getStockHardStop(code, ym, atrMult) = clamp(1.5, ATR14%×atrMult, 8.0%)
@@ -238,29 +238,66 @@ export function runBacktest(period, params, customRange = null) {
       if (prevK < sma5) return;
     }
 
+    // ★ L1: Market Shield — 하락장 + 전월 약세 차단 (실전 telegram_alert.py 일치화)
+    //   JS L0가 양수월만 통과시키므로 실질 효과는 없으나, 코드 일치성 및 파라미터 변경 대비 보존
+    const prevR = i > 0 ? monthly[i - 1].r : 0;
+    if (m.r < -1) {
+      const sentScore = prevR / 15;
+      if (sentScore < params.finBertThresh) return;
+    }
+
     // ★ 해당 월에 실제 데이터가 있는 종목만 사용 (상장 전 종목 자동 제외)
     const availableStocks = GDB_STOCK_POOL.filter(s => GDB_STOCK_MONTHLY[s.code]?.[ym] !== undefined);
     if (availableStocks.length === 0) return;
 
-    // CVD 모멘텀 게이트: 최근 추세가 하락 우세이면 반등월에도 진입 차단
+    // CVD 모멘텀 게이트: 최근 추세가 하락 우세이고 하락월에만 진입 차단 (실전 일치화)
     const cvdMonths = Math.max(1, Math.round(params.cvdWin / 15));
     const cvdSlice  = monthly.slice(Math.max(0, i - cvdMonths), i);
     if (cvdSlice.length >= 2) {
       const netCVD  = cvdSlice.reduce((acc, x) => acc + (x.r > 0 ? 1 : -1), 0);
       const cvdGate = -Math.floor(params.cvdCompare / 2);
-      if (netCVD <= cvdGate) return;   // 베어 모멘텀 → 반등월에도 진입 차단
+      if (netCVD <= cvdGate && m.r < 0) return;   // ★ P3: 하락월에만 차단 (실전 일치화)
     }
 
-    // ★ Phase 1-B: RSI-2 낮은 순 정렬 — 과매도 상위 nSlots 종목 선택 (Seed 완전 제거)
-    //   실전과 동일: 가장 과매도된 종목 순서대로 nSlots만큼 매수
-    const rankedStocks = availableStocks
-      .map(s => ({ ...s, rsi2: GDB_STOCK_MONTHLY[s.code]?.[ym]?.rsi2 ?? 50 }))
-      .sort((a, b) => a.rsi2 - b.rsi2)
-      .slice(0, NSLOTS);
+    // ★ L4: 약한 모멘텀 → 슬롯 절반 (실전 일치화)
+    //   |당월 수익률| < sigThresh×2 → 포트폴리오 반감 운용
+    const absR = Math.abs(m.r);
+    const weakMarket = absR < sigThresh * 2;
+    const effectiveSlots = weakMarket ? Math.max(1, Math.floor(NSLOTS / 2)) : NSLOTS;
+
+    // ★ Phase 1-B + P1 + Q1 + Q3-C: RSI-2/ADX 하드 필터 + RS 가중 정렬 (실전 일치화)
+    //   실전: RSI-2 ≤ rsi2Entry AND ADX ≥ adx 필터 → (RSI-2×0.6 + RS역순×0.4) 정렬 → 상위 effectiveSlots
+    //   ADX 데이터: GDB 재빌드(add_adx_to_gdb.py) 완료 — adx 필드 활성화
+    // ★ #8: RS look-ahead bias 제거 — 전월 KOSPI/종목 수익률 기준으로 RS 계산
+    const prevKospiR = i > 0 ? monthly[i - 1].r : 0;
+    const prevYm = i > 0
+      ? `${String(monthly[i-1].year).slice(2)}-${String(monthly[i-1].month).padStart(2,"0")}`
+      : ym;
+    const withIndicators = availableStocks.map(s => {
+      const d     = GDB_STOCK_MONTHLY[s.code]?.[ym] ?? {};
+      const prevD = GDB_STOCK_MONTHLY[s.code]?.[prevYm] ?? {};
+      const rs    = (prevD.r ?? 0) - prevKospiR;  // ★ #8: 전월 종목수익률 − 전월 KOSPI (look-ahead bias 제거)
+      return { ...s, rsi2: d.rsi2 ?? 50, adx: d.adx ?? 0, rs };
+    });
+
+    // RSI-2 ≤ rsi2Entry AND ADX ≥ adx 하드 필터
+    const filtered = withIndicators.filter(
+      s => s.rsi2 <= params.rsi2Entry && s.adx >= params.adx   // ★ Q1: ADX 필터 활성화
+    );
+
+    // ★ Q3-C: RS 순위 계산 (높은 RS → 낮은 rs_rank → sort score 낮아짐 → 상위 선택)
+    const sortedByRS = [...filtered].sort((a, b) => b.rs - a.rs);
+    const rsRankMap  = {};
+    sortedByRS.forEach((s, i) => { rsRankMap[s.code] = i / Math.max(sortedByRS.length - 1, 1); });
+
+    // 정렬 스코어: RSI-2(0~100 정규화)×0.6 + RS역순(0~1)×0.4 → 낮을수록 우선 선택
+    const rankedStocks = filtered
+      .map(s => ({ ...s, sortScore: (s.rsi2 / 100) * 0.6 + rsRankMap[s.code] * 0.4 }))
+      .sort((a, b) => a.sortScore - b.sortScore)
+      .slice(0, effectiveSlots);
 
     rankedStocks.forEach((stock, slot) => {
       const entryDay = 3 + slot * 3;          // 슬롯 0→3일, 1→6일, 2→9일, 3→12일, 4→15일
-      const prevR    = i > 0 ? monthly[i - 1].r : 0;
       const momentumBonus = prevR >= 8 ? 5 : prevR >= 5 ? 2 : 0;
       const rawHold  = Math.min(25, 18 + momentumBonus);
       const holdDays = params.timeCutOn ? Math.min(params.timeCut, rawHold) : rawHold;
@@ -329,7 +366,10 @@ export function runBacktest(period, params, customRange = null) {
     tradeByMonth[applyMonth].push(t.ret);
   });
 
-  let stratVal = 100;
+  // ★ #1: 복리 누적 → 개별 거래 수익률 단순합산 방식 (Python V3 동일 구조)
+  //   각 거래: profit_i = ret_i / 100 * CAPITAL_PER_SLOT (고정 원금)
+  //   전체 수익률: Σprofit_i / BASE_CAPITAL (비복리)
+  let cumProfit = 0;
   const curve = raw.map((pt) => {
     const kospi   = +((pt.k / base) * 100).toFixed(2);
     const d       = kospi - 100;
@@ -337,10 +377,11 @@ export function runBacktest(period, params, customRange = null) {
     const monthTrades = tradeByMonth[pt.d];
     if (monthTrades && monthTrades.length > 0) {
       monthTrades.forEach(ret => {
-        stratVal = stratVal * (1 + ret / 100 / NSLOTS);
+        cumProfit += ret / 100 * CAPITAL_PER_SLOT;   // 고정 슬롯 원금 기준 P&L 누적
       });
     }
-    return { date: pt.d, kospi, strategy: +stratVal.toFixed(2), buyhold };
+    const strategy = +(100 + cumProfit / BASE_CAPITAL * 100).toFixed(2);
+    return { date: pt.d, kospi, strategy, buyhold };
   });
 
   return { curve, monthly, tradeLog };
@@ -578,7 +619,7 @@ export function runBacktestLive(period, params, customRange = null, liveData = n
 
     rankedStocks.forEach((stock, slot) => {
       const entryDay = 3 + slot * 3;
-      const prevR    = i > 0 ? monthly[i - 1].r : 0;
+      // prevR: monthly 레벨에서 이미 계산 (L1 Market Shield와 공유)
       const momentumBonus = prevR >= 8 ? 5 : prevR >= 5 ? 2 : 0;
       const rawHold  = Math.min(25, 18 + momentumBonus);
       const holdDays = params.timeCutOn ? Math.min(params.timeCut, rawHold) : rawHold;

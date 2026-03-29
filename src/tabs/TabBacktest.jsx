@@ -71,10 +71,11 @@ function AISuggestions({ period, kpi, params, setParams, stratTotalRet = 0, stra
   const [applied, setApplied] = useState(null);
   const [beforeSnap, setBeforeSnap] = useState(null);
 
+  // ★ #7: v11.0 기준 (adx:20, rsi2Entry:25, zscore:1.0, trailing:10.0) AI 제안 갱신
   const sug = [
-    { id:1, changes:"ADX:30→25, RSI-2:15→20",            score:0.87, comment:"추세 필터 완화 → 진입 기회↑" },
-    { id:2, changes:"Z-Score:2.0→1.8, Trailing:2.5→2.0", score:0.82, comment:"변동성 축소 → MDD↓ 승률↑" },
-    { id:3, changes:"Time-Cut:10→8, RSI-2:90→85",          score:0.79, comment:"조기청산 강화 → MDD 최소화" },
+    { id:1, changes:"ADX:20→15, RSI-2:25→30",             score:0.87, comment:"추세/과매도 필터 완화 → 진입 기회↑" },
+    { id:2, changes:"Z-Score:1.0→1.3, Trailing:10.0→8.0", score:0.82, comment:"변동성 상향 + TrailingStop 강화 → MDD↓" },
+    { id:3, changes:"ADX:20→25, RSI-2:25→20",              score:0.79, comment:"추세 필터 강화 + 과매도 엄격화 → 승률↑" },
   ];
 
   const sugResults = useMemo(() =>
@@ -519,10 +520,14 @@ export default function TabBacktest({ params, setParams, period, setPeriod, cust
               </span>
             )}
           </p>
-          <div className="flex gap-3 text-[10px] text-slate-400">
+          <div className="flex items-center gap-3 text-[10px] text-slate-400 flex-wrap">
             <span className="flex items-center gap-1"><span className="w-4 h-0.5 bg-indigo-400 inline-block rounded"/>전략 시뮬</span>
             <span className="flex items-center gap-1"><span className="w-4 h-0.5 bg-emerald-400 inline-block rounded"/>B&H</span>
             <span className="flex items-center gap-1"><span className="w-4 h-0.5 bg-slate-400 inline-block rounded"/>KOSPI200</span>
+            {/* ★ P5: Trailing Stop 미반영 보수적 시뮬 안내 레이블 */}
+            <span className="ml-2 px-2 py-0.5 rounded bg-amber-900/40 border border-amber-700/50 text-amber-400 font-medium">
+              ⚠ Trailing Stop 미반영 · 보수적 시뮬값
+            </span>
           </div>
         </div>
         {/* 기간 요약 행 */}
@@ -626,8 +631,8 @@ export default function TabBacktest({ params, setParams, period, setPeriod, cust
         </ResponsiveContainer>
       </div>
 
-      {/* 연도별 성과 + 히트맵 */}
-      <div className="grid grid-cols-2 gap-4">
+      {/* 연도별 성과 + 히트맵 — 숨김 처리 (#2 #3) */}
+      <div className="grid grid-cols-2 gap-4" style={{ display: "none" }}>
         {/* 연도별 실제 성과 */}
         <div className="bg-slate-800 rounded-xl p-4 border border-slate-700">
           <div className="flex items-center gap-2 mb-3">
@@ -852,6 +857,29 @@ export default function TabBacktest({ params, setParams, period, setPeriod, cust
                   </React.Fragment>
                 );
               })}
+              {/* ★ #4: 총 거래횟수 합계 행 */}
+              <tr className="border-t-2 border-indigo-700 bg-indigo-950/30">
+                <td colSpan={2} className="py-2.5 px-2 text-xs font-bold text-indigo-300">
+                  📊 합계 ({distinctStocks.length}개 종목)
+                </td>
+                <td className="py-2.5 text-center">
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-800 text-indigo-200">
+                    총 {tradeLog.length}건
+                  </span>
+                  <span className="block text-[9px] text-slate-500 mt-0.5">
+                    {tradeLog.filter(t=>t.ret>0).length}승/{tradeLog.filter(t=>t.ret<=0).length}패
+                  </span>
+                </td>
+                <td className="py-2.5 text-center text-slate-500 text-[10px]">—</td>
+                <td className="py-2.5 text-center text-slate-500 text-[10px]">—</td>
+                <td className={`py-2.5 text-right font-bold text-xs ${rc(tradeTotalPnl)}`}>
+                  {tradeTotalPnl >= 0 ? "+" : ""}{(tradeTotalPnl / BASE_CAPITAL * 100).toFixed(1)}%
+                </td>
+                <td className={`py-2.5 text-right font-bold text-xs ${rc(tradeTotalPnl)}`}>
+                  {krw(tradeTotalPnl)}
+                </td>
+                <td></td>
+              </tr>
             </tbody>
           </table>
         </div>
@@ -1081,6 +1109,13 @@ function TradeVerifyPanel() {
 
   const FILTERS = ["전체","수익","손실","만기청산","TrailingStop","HardStop"];
 
+  // ★ #5: 종목별 거래횟수 사전 계산
+  const stockCountMap = React.useMemo(() => {
+    const m = {};
+    PYTHON_TRADE_LOG.forEach(t => { m[t.code] = (m[t.code] ?? 0) + 1; });
+    return m;
+  }, []);
+
   const sorted = React.useMemo(() => {
     let rows = [...PYTHON_TRADE_LOG];
     if (filter === "수익")       rows = rows.filter(t => t.ret > 0);
@@ -1118,7 +1153,11 @@ function TradeVerifyPanel() {
       <div className="px-5 py-3 border-b border-slate-700 flex items-center justify-between flex-wrap gap-2">
         <div>
           <span className="text-white font-bold text-sm">📋 V3 전체 매매 기록</span>
-          <span className="text-slate-500 text-xs ml-2">Python 엔진 (일별 OHLCV) · 5년 105건</span>
+          {/* ★ #5: 총 건수 뱃지 */}
+          <span className="ml-2 px-2 py-0.5 rounded-full text-[11px] font-bold bg-amber-800/60 text-amber-300 border border-amber-700">
+            총 {PYTHON_TRADE_LOG.length}건
+          </span>
+          <span className="text-slate-500 text-xs ml-2">Python 엔진 (일별 OHLCV) · v11.0 파라미터 기준</span>
         </div>
         <div className="flex gap-2 flex-wrap items-center">
           <input
@@ -1170,6 +1209,7 @@ function TradeVerifyPanel() {
             <tr className="text-slate-500 border-b border-slate-700">
               <th className={th("id")}    onClick={()=>toggleSort("id")}   >#</th>
               <th className={th("name")}  onClick={()=>toggleSort("name")} >종목명</th>
+              <th className="text-slate-500 px-1">거래횟수</th>
               <th className={th("ym")}    onClick={()=>toggleSort("ym")}   >진입월</th>
               <th className={th("entry")} onClick={()=>toggleSort("entry")}>매수일</th>
               <th className={th("exit")}  onClick={()=>toggleSort("exit")} >매도일</th>
@@ -1189,6 +1229,16 @@ function TradeVerifyPanel() {
                 <td className="py-1.5 pl-2">
                   <span className="text-white font-medium">{t.name}</span>
                   <span className="text-slate-600 ml-1 font-mono text-[10px]">{t.code}</span>
+                </td>
+                {/* ★ #5: 종목별 거래횟수 */}
+                <td className="py-1.5 text-center">
+                  <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold ${
+                    (stockCountMap[t.code] ?? 0) >= 3
+                      ? "bg-amber-900/60 text-amber-300"
+                      : "bg-slate-700 text-slate-400"
+                  }`}>
+                    {stockCountMap[t.code] ?? 1}건
+                  </span>
                 </td>
                 <td className="py-1.5 text-center text-slate-400 font-mono">{t.ym}</td>
                 <td className="py-1.5 text-center text-emerald-500 font-mono">▲ {t.entry}</td>

@@ -254,7 +254,7 @@ GDB_STOCK_POOL = [
 # ─────────────────────────────────────────────
 PARAMS = {
     "adx":           20,    # ADX 최소값 (시장 추세 강도 / 종목 ADX 하한)
-    "rsi2Entry":     15,    # RSI-2 진입 임계값 (이하일 때 매수)
+    "rsi2Entry":     25,    # RSI-2 진입 임계값 (이하일 때 매수) ★ Q3-A: 15→25 완화
     "zscore":        1.0,   # sigThresh 스케일 인자
     "nSlots":        5,     # 동시 보유 최대 종목 수
     # hardStop: backtest.js에서도 직접 미사용 (atrMult 기반 동적 계산이 우선)
@@ -687,6 +687,28 @@ def get_real_signals(today: datetime.datetime):
         market_info["blocked"] = f"L0: {reason}"
         return [], [], today_str, {}, False, market_info
 
+    # ── L0-B: KOSPI200 SMA5 이격도 (backtest.js 일치화)
+    #   전월 지수가 5개월 이동평균 아래 → 하락 추세 → 진입 금지
+    if len(monthly_hist) >= 7:
+        hist_rev = list(reversed(monthly_hist))   # 오래된 → 최신 순
+        k = 100.0
+        k_vals = []
+        for entry in hist_rev:
+            k = k * (1 + entry["r"] / 100)
+            k_vals.append(k)
+        # k_vals[-1] = 당월, k_vals[-2] = 전월, k_vals[-6:-1] = 직전 5개월
+        if len(k_vals) >= 6:
+            prev_k = k_vals[-2]
+            sma5   = sum(k_vals[-6:-1]) / 5
+            market_info["prev_k"] = round(prev_k, 2)
+            market_info["sma5"]   = round(sma5, 2)
+            if prev_k < sma5:
+                reason = f"전월K({prev_k:.1f}) < SMA5({sma5:.1f}) → 하락추세"
+                print(f"  ⛔ L0-B 차단: {reason}")
+                market_info["blocked"] = f"L0-B: {reason}"
+                return [], [], today_str, {}, False, market_info
+            print(f"  ✅ L0-B 통과: 전월K={prev_k:.1f} ≥ SMA5={sma5:.1f}")
+
     # ── L1: 하락장 + 전월 약세 (backtest: m.r < -1 && sentScore < finBertThresh)
     if curr["r"] < -1:
         sent_score = prev["r"] / 15
@@ -771,15 +793,33 @@ def get_real_signals(today: datetime.datetime):
             atr_pct_val   = _atr_pct(df, 14)
             dyn_hard_stop = round(max(1.5, min(8.0, atr_pct_val * p["atrMult"])), 2)
 
+            # ★ Q2: 전월 종목 수익률 계산 → RS = stock_prev_ret - kospi_prev_ret (backtest.js 일치화)
+            #   backtest.js: rs = stock.r - m.r (당월 기준)
+            #   실전: 당월 수익률은 미완성 → 전월 기준 RS 사용 (t-1 기준 진입 로직과 동일 타이밍)
+            try:
+                prev_m_end   = today.replace(day=1) - datetime.timedelta(days=1)
+                prev_m_start = prev_m_end.replace(day=1)
+                pm_data = close[
+                    (close.index >= pd.Timestamp(prev_m_start)) &
+                    (close.index <= pd.Timestamp(prev_m_end))
+                ]
+                if len(pm_data) >= 2:
+                    stock_prev_ret = float((pm_data.iloc[-1] / pm_data.iloc[0] - 1) * 100)
+                else:
+                    stock_prev_ret = 0.0
+            except Exception:
+                stock_prev_ret = 0.0
+
             candidates.append({
-                "code":          code,
-                "name":          name_map.get(code, code),
-                "rsi2":          round(rsi2, 1),
-                "rsi14":         round(rsi14, 1),
-                "adx":           round(adx, 1),
-                "vol_z":         round(vol_z, 2),
-                "price":         price,
-                "hard_stop_pct": dyn_hard_stop,  # 종목별 동적 hardStop
+                "code":           code,
+                "name":           name_map.get(code, code),
+                "rsi2":           round(rsi2, 1),
+                "rsi14":          round(rsi14, 1),
+                "adx":            round(adx, 1),
+                "vol_z":          round(vol_z, 2),
+                "price":          price,
+                "hard_stop_pct":  dyn_hard_stop,
+                "prev_month_ret": round(stock_prev_ret, 2),  # ★ Q2: 전월 종목 수익률
             })
         except Exception:
             continue
@@ -788,8 +828,21 @@ def get_real_signals(today: datetime.datetime):
     filtered = [c for c in candidates
                 if c["rsi2"] <= p["rsi2Entry"] and c["adx"] >= p["adx"]]
 
-    # RSI-2 오름차순 (가장 과매도 → 슬롯1)
-    filtered.sort(key=lambda x: x["rsi2"])
+    # ★ Q3-C + Q2: RS 가중 정렬 (backtest.js 완전 일치화)
+    #   RS = 전월 종목 수익률 - 전월 KOSPI 수익률 (초과수익)
+    #   정렬 스코어 = (RSI-2/100)×0.6 + RS역순(0~1)×0.4  → 낮을수록 우선 선택
+    kospi_prev_r = prev["r"]
+    for c in filtered:
+        c["rs"] = c.get("prev_month_ret", 0.0) - kospi_prev_r  # ★ Q2: 실제 RS 연동
+
+    if len(filtered) > 1:
+        rs_sorted = sorted(filtered, key=lambda x: x["rs"], reverse=True)
+        rs_rank   = {c["code"]: i / (len(rs_sorted) - 1) for i, c in enumerate(rs_sorted)}
+    else:
+        rs_rank = {c["code"]: 0.0 for c in filtered}
+
+    filtered.sort(key=lambda x: (x["rsi2"] / 100) * 0.6 + rs_rank.get(x["code"], 0.0) * 0.4)
+    print(f"  📊 RS 정렬 기준: 전월 종목수익률 vs KOSPI({kospi_prev_r:+.2f}%) 초과수익 순위")
 
     print(f"\n  ── 스크리닝 결과 ─────────────────────────────────────")
     print(f"  유효 종목: {len(candidates)}개  "
