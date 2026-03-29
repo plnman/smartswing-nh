@@ -602,6 +602,8 @@ export function runBacktestLive(period, params, customRange = null, liveData = n
     const availableStocks = GDB_STOCK_POOL.filter(s => GDB_STOCK_MONTHLY[s.code]?.[ym] !== undefined);
     if (availableStocks.length === 0) return;
 
+    const prevR = i > 0 ? monthly[i - 1].r : 0;  // ★ Fix: momentumBonus 계산용 전월 KOSPI 수익률
+
     // CVD 모멘텀 게이트: 하락 우세 추세이면 반등월에도 진입 차단
     const cvdMonths = Math.max(1, Math.round(params.cvdWin / 15));
     const cvdSlice  = monthly.slice(Math.max(0, i - cvdMonths), i);
