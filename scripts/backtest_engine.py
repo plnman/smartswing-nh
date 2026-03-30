@@ -58,7 +58,7 @@ DEFAULT_PARAMS = {
     "timeCutOn": False, "timeCut": 10,
     "trailing": 10.0, "rsi2Exit": 99,
     "finBertThresh": 0.09,
-    "cvdWin": 70, "cvdCompare": 7,
+    "cvdWin": 70, "cvdCompare": 0,   # ★ v12.1: 7→0 (L0-B와 구조충돌 해소: net≤0 조건)
 }
 TRADE_COST_PCT = 0.31   # 라운드트립 거래비용 (%)
 BASE_CAPITAL   = 50_000_000

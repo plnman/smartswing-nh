@@ -266,7 +266,7 @@ PARAMS = {
     "rsi2Exit":      99,    # RSI-2 청산 임계값
     "finBertThresh": 0.09,  # L1: 전월 수익률/15 임계값
     "cvdWin":        70,    # CVD 윈도우 (일, /15 = 개월)
-    "cvdCompare":    7,     # cvdGate = -floor(7/2) = -3
+    "cvdCompare":    0,     # cvdGate = -floor(0/2) = 0 → net≤0 조건 ★ v12.1
 }
 
 CAPITAL_PER_SLOT = 10_000_000
