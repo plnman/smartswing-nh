@@ -3,11 +3,18 @@
 // params 슬라이더 + 7개 검증 체크리스트 + 기본값 버튼
 // ════════════════════════════════════════════════════════════════════════
 import React, { useState } from "react";
-import {
-  DEFAULT_PARAMS, CAPITAL_PER_SLOT, krw,
-} from "../backtest.js";
+import { params as ENGINE_PARAMS, validationTrace as VALIDATION_TRACE } from "../results_data.js";
 import { db } from "../firebase.js";
 import { doc, setDoc } from "firebase/firestore";
+
+const DEFAULT_PARAMS   = ENGINE_PARAMS;
+const CAPITAL_PER_SLOT = 10_000_000;
+const krw = (v) => {
+  const av = Math.abs(v);
+  if (av >= 100_000_000) return (v / 100_000_000).toFixed(1) + "억";
+  if (av >= 10_000)      return Math.round(v / 10_000) + "만";
+  return v.toLocaleString() + "원";
+};
 
 // ── ParamSlider 컴포넌트 (Tab3 외부 정의 — React 안티패턴 방지)
 function ParamSlider({ label, val, min, max, step, unit, note, reason, locked, pk, setParams }) {
@@ -51,6 +58,7 @@ export default function TabStrategy({ params, setParams, setTab, period, validat
   const [saved,        setSaved]       = useState(false);
   const [defaultSaved, setDefaultSaved] = useState(false);
   const [rerunning,    setRerun]        = useState(false);
+  const [showValidation, setShowValidation] = useState(false);
 
   const handleSave = () => {
     try { localStorage.setItem("smartswing_params", JSON.stringify(params)); } catch(e) {}
@@ -488,6 +496,82 @@ export default function TabStrategy({ params, setParams, setTab, period, validat
             <span><span className="font-bold text-red-200">{validationResults.total - validationResults.passCount}개 항목 미통과</span> — 설정 저장 전 파라미터를 재검토하세요. 상승·하락장 한 쪽이 무너지는 설정입니다.</span>
           </div>
         )}
+      </div>
+
+      {/* ── 로직 검증 섹션 (validationTrace 기반) */}
+      <div className="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden">
+        <button onClick={() => setShowValidation(v => !v)}
+          className="w-full px-4 py-3 flex items-center justify-between hover:bg-slate-750 transition-colors">
+          <div className="flex items-center gap-2">
+            <span>🔬</span>
+            <span className="text-sm font-semibold text-slate-200">로직 검증 — 월별 필터 추적 & 데드로직 탐지</span>
+            <span className="text-[10px] bg-indigo-900/50 text-indigo-300 px-2 py-0.5 rounded">
+              {VALIDATION_TRACE.length}개월 · 진입 {VALIDATION_TRACE.filter(t=>!t.blocked_by).length}개월 · 차단 {VALIDATION_TRACE.filter(t=>t.blocked_by).length}개월
+            </span>
+          </div>
+          <span className="text-slate-500 text-xs">{showValidation ? "▲ 접기" : "▼ 펼치기"}</span>
+        </button>
+
+        {showValidation && (() => {
+          const active  = VALIDATION_TRACE.filter(t => !t.blocked_by);
+          const blocked = VALIDATION_TRACE.filter(t => t.blocked_by);
+          // 필터별 활성화 횟수
+          const filterCounts = {};
+          blocked.forEach(t => {
+            const key = (t.blocked_by || "").split(":")[0].trim();
+            filterCounts[key] = (filterCounts[key] || 0) + 1;
+          });
+          const allFilters = ["L0","L0-B","L1","L3","후보종목 0개"];
+          const deadFilters = allFilters.filter(f => !filterCounts[f]);
+          return (
+            <div className="px-4 pb-4 space-y-3 border-t border-slate-700">
+              {/* 필터 활성화 요약 */}
+              <div className="mt-3 grid grid-cols-5 gap-2">
+                {allFilters.map(f => {
+                  const cnt = filterCounts[f] || 0;
+                  const isDead = cnt === 0;
+                  return (
+                    <div key={f} className={`rounded-lg p-2 text-center border ${isDead ? "bg-red-950/60 border-red-700/50" : "bg-slate-900 border-slate-700"}`}>
+                      <p className={`text-[10px] font-bold mb-0.5 ${isDead ? "text-red-300" : "text-slate-300"}`}>{f}</p>
+                      <p className={`text-xs font-bold ${isDead ? "text-red-400" : "text-emerald-400"}`}>
+                        {isDead ? "🔴 DEAD" : `${cnt}개월`}
+                      </p>
+                    </div>
+                  );
+                })}
+              </div>
+              {deadFilters.length > 0 && (
+                <div className="flex items-center gap-2 p-2 bg-red-950/50 border border-red-700/50 rounded-lg">
+                  <span className="text-red-400 text-xs">🔴 데드로직 감지: {deadFilters.join(", ")} — 실제 동작 없음</span>
+                </div>
+              )}
+              {deadFilters.length === 0 && (
+                <div className="flex items-center gap-2 p-2 bg-emerald-950/40 border border-emerald-700/40 rounded-lg">
+                  <span className="text-emerald-400 text-xs">✅ 모든 필터 정상 동작 — 데드로직 없음</span>
+                </div>
+              )}
+              {/* 월별 상세 */}
+              <div className="max-h-64 overflow-y-auto space-y-1 text-[10px] font-mono">
+                {VALIDATION_TRACE.map(t => (
+                  <div key={t.ym} className={`flex items-start gap-2 px-2 py-1 rounded ${t.blocked_by ? "bg-red-950/30" : "bg-slate-900/60"}`}>
+                    <span className="text-slate-500 w-10 shrink-0">{t.ym}</span>
+                    <span className={`w-20 shrink-0 font-bold ${t.kospi_r >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                      KOSPI {t.kospi_r > 0 ? "+" : ""}{t.kospi_r?.toFixed(1)}%
+                    </span>
+                    {t.blocked_by ? (
+                      <span className="text-red-300">🚫 {t.blocked_by}</span>
+                    ) : (
+                      <span className="text-emerald-300">
+                        ✓ 진입 — 후보 {t.candidates}개 → 선택 {t.selected?.length ?? 0}종목
+                        {t.selected?.length > 0 && <span className="text-slate-500 ml-1">({t.selected.slice(0,3).join(", ")}{t.selected.length > 3 ? "..." : ""})</span>}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
       </div>
 
       {/* ── 버튼 행 */}

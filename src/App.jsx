@@ -3,7 +3,9 @@ import TabBacktest  from "./tabs/TabBacktest.jsx";
 import TabLiveSim   from "./tabs/TabLiveSim.jsx";
 import TabTrades    from "./tabs/TabTrades.jsx";
 import TabStrategy  from "./tabs/TabStrategy.jsx";
-import { DEFAULT_PARAMS, runBacktest } from "./backtest.js";
+import { kpi as RESULTS_KPI, params as RESULTS_PARAMS, curve as RESULTS_CURVE, validationTrace as RESULTS_TRACE } from "./results_data.js";
+
+const DEFAULT_PARAMS = RESULTS_PARAMS;
 
 // ── 탭 정의 (id 3 배지는 App에서 동적 렌더링)
 const TABS = [
@@ -33,12 +35,12 @@ export default function App() {
     try { localStorage.setItem("smartswing_params", JSON.stringify(params)); } catch(e) {}
   }, [params]);
 
-  // ── 검증 체크리스트 — params 변경 시 자동 재계산 (탭 위치 무관)
+  // ── 검증 체크리스트 — Python 엔진 결과(results_data.js) 기반
   const validationResults = useMemo(() => {
-    const { curve } = runBacktest("5년", params);
+    const curve = RESULTS_CURVE;
     const getYearRet = (s, e) => {
-      const si = curve.findIndex(p => p.date === s);
-      const ei = curve.findIndex(p => p.date === e);
+      const si = curve.findIndex(pt => pt.date === s);
+      const ei = curve.findIndex(pt => pt.date === e);
       if (si < 0 || ei < 0 || ei <= si) return null;
       return +((curve[ei].strategy / curve[si].strategy - 1) * 100).toFixed(1);
     };
@@ -46,16 +48,11 @@ export default function App() {
     const r2023 = getYearRet("22-12", "23-12");
     const r2024 = getYearRet("23-12", "24-12");
     const r2025 = getYearRet("24-12", "25-12");
-    let peak = 0, maxDD = 0;
-    curve.forEach(p => { if (p.strategy > peak) peak = p.strategy; const dd = (p.strategy - peak) / peak * 100; if (dd < maxDD) maxDD = dd; });
-    const mdd5y = +maxDD.toFixed(1);
-    const monthlyRets = [];
-    for (let i = 1; i < curve.length; i++) monthlyRets.push((curve[i].strategy - curve[i-1].strategy) / curve[i-1].strategy * 100);
-    const meanR = monthlyRets.reduce((a, b) => a + b, 0) / monthlyRets.length;
-    const stdR  = Math.sqrt(monthlyRets.reduce((a, b) => a + (b - meanR) ** 2, 0) / monthlyRets.length);
-    const sharpe5y = stdR > 0 ? +((meanR / stdR) * Math.sqrt(12)).toFixed(2) : 0;
-    const strat5y = +((curve[curve.length - 1]?.strategy - 100).toFixed(1));
-    const bh5y    = +((curve[curve.length - 1]?.buyhold   - 100).toFixed(1));
+    const mdd5y  = +(RESULTS_KPI.mdd ?? 0).toFixed(1);
+    const sharpe5y = +(RESULTS_KPI.sharpe ?? 0);
+    const strat5y  = +(RESULTS_KPI.totalRet ?? 0);
+    const lastKospi = curve.length > 0 ? (curve[curve.length - 1].kospi ?? 100) : 100;
+    const bh5y     = +(lastKospi - 100).toFixed(1);
     const checks = [
       { cat:"📈 상승장", label:"2023 회복(+23.5%)",  val:r2023,          pass: r2023  !== null && r2023  >= 10,  desc:"전략 ≥ +10% 포착" },
       { cat:"📈 상승장", label:"2025 폭등(+90.7%)",  val:r2025,          pass: r2025  !== null && r2025  >= 50,  desc:"전략 ≥ +50% 포착" },
@@ -66,7 +63,7 @@ export default function App() {
       { cat:"🛡 안전성",  label:"Sharpe 5년",         val:sharpe5y,       pass: sharpe5y >= 0.5,                 desc:"≥ 0.5 권장" },
     ];
     return { checks, passCount: checks.filter(c => c.pass).length, total: checks.length, strat5y, bh5y };
-  }, [params]);
+  }, []);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100" style={{ fontFamily:"'Inter','Noto Sans KR',sans-serif" }}>

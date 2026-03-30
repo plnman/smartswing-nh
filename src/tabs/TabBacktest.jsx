@@ -1,7 +1,7 @@
 // ════════════════════════════════════════════════════════════════════════
-// TabBacktest — 백테스팅 탭 (SmartSwing_Dashboard_v3 Tab1 완전 이식)
-// GDB 동결 데이터 기반. backtest.js에서 모든 데이터/엔진 임포트.
-// UDB(Firebase) 신규 월 데이터 자동 merge 지원.
+// TabBacktest — 백테스팅 탭 v12.0
+// Python 일별 엔진(backtest_engine.py) 결과(results_data.js) 기반.
+// backtest.js 완전 제거 — 로직 일원화 완료.
 // ════════════════════════════════════════════════════════════════════════
 import React, { useState, useEffect, useMemo } from "react";
 import {
@@ -9,16 +9,107 @@ import {
   Tooltip, ResponsiveContainer, ReferenceLine, ReferenceArea,
 } from "recharts";
 import {
-  EQUITY_CURVE_RAW, ALL_MONTHLY, DEFAULT_PARAMS,
-  KPI_BY_PERIOD,
-  BASE_CAPITAL, CAPITAL_PER_SLOT, TRADE_COST_PCT,
-  krw, STOCK_POOL,
-  rc, heatColor, runBacktest,
-  buildLiveMonthly, buildLiveEquityCurve, buildLiveStockATR,
-  computeKPIByPeriod, computeYearlyStats, runBacktestLive,
-} from "../backtest.js";
-import { db, COL } from "../firebase.js";
-import { collection, getDocs, doc, setDoc } from "firebase/firestore";
+  tradeLog as FULL_TRADE_LOG,
+  curve    as FULL_CURVE,
+  kpi      as FULL_KPI,
+  params   as ENGINE_PARAMS,
+  validationTrace as VALIDATION_TRACE,
+} from "../results_data.js";
+
+// ── 로컬 상수 (backtest.js에서 이전)
+const BASE_CAPITAL     = 50_000_000;
+const CAPITAL_PER_SLOT = 10_000_000;
+const TRADE_COST_PCT   = 0.31;
+const DEFAULT_PARAMS   = ENGINE_PARAMS;
+
+// ── 유틸리티 함수 (backtest.js에서 이전)
+const krw = (v) => {
+  const av = Math.abs(v);
+  if (av >= 100_000_000) return (v / 100_000_000).toFixed(1) + "억";
+  if (av >= 10_000)      return Math.round(v / 10_000) + "만";
+  return v.toLocaleString() + "원";
+};
+const rc = (v) => v > 0 ? "text-emerald-400" : v < 0 ? "text-red-400" : "text-slate-400";
+const heatColor = (r) => {
+  if (r >= 8)  return "bg-emerald-600 text-white";
+  if (r >= 4)  return "bg-emerald-700/70 text-emerald-200";
+  if (r >= 1)  return "bg-emerald-900/60 text-emerald-300";
+  if (r >= -1) return "bg-slate-700 text-slate-400";
+  if (r >= -4) return "bg-red-900/50 text-red-300";
+  if (r >= -8) return "bg-red-700/70 text-red-200";
+  return "bg-red-600 text-white";
+};
+
+// ── KOSPI 월별 데이터 (curve에서 역산)
+const ALL_MONTHLY = FULL_CURVE.slice(1).map((pt, i) => ({
+  d: pt.date,
+  r: +((pt.kospi / FULL_CURVE[i].kospi - 1) * 100).toFixed(2),
+}));
+
+// ── 커스텀 range 드롭다운용 날짜 목록
+const EQUITY_CURVE_RAW = FULL_CURVE.map(pt => ({ d: pt.date, k: pt.kospi }));
+
+// ── 기간별 데이터 필터링 함수 (backtest.js의 runBacktest 대체)
+const PERIOD_START = { "1년": "25-03", "3년": "23-03", "5년": "21-03" };
+function getBacktestData(period, customRange) {
+  let startYm = "21-03", endYm = FULL_CURVE[FULL_CURVE.length - 1]?.date ?? "26-03";
+  if (period === "커스텀") {
+    startYm = customRange?.start ?? "21-03";
+    endYm   = customRange?.end   ?? endYm;
+  } else {
+    startYm = PERIOD_START[period] ?? "21-03";
+  }
+  const curve = FULL_CURVE.filter(pt => pt.date >= startYm && pt.date <= endYm);
+  // base 재정규화 (100 시작)
+  const base = curve[0]?.strategy ?? 100;
+  const kBase = curve[0]?.kospi ?? 100;
+  const normalizedCurve = curve.map(pt => ({
+    ...pt,
+    strategy: +(pt.strategy / base * 100).toFixed(2),
+    buyhold:  +(pt.kospi / kBase * 100).toFixed(2),
+    kospi:    +(pt.kospi / kBase * 100).toFixed(2),
+  }));
+  const tl = FULL_TRADE_LOG.filter(t => t.ym >= startYm && t.ym <= endYm);
+  const monthly = ALL_MONTHLY.filter(m => m.d >= startYm && m.d <= endYm);
+  return { curve: normalizedCurve, tradeLog: tl, monthly };
+}
+
+// ── 기간별 KOSPI KPI 사전 계산
+function computeKpiForCurve(curve, period) {
+  if (curve.length < 2) return { totalRet: 0, annRet: 0, mdd: 0, sharpe: 0, vol: 0, start: "", end: "" };
+  const fin = curve[curve.length - 1].kospi;
+  const totalRet = +(fin - 100).toFixed(1);
+  const n = curve.length - 1;
+  const annRet = n >= 10 ? +((Math.pow(fin / 100, 12 / n) - 1) * 100).toFixed(1) : totalRet;
+  let peak = -Infinity, maxDD = 0;
+  curve.forEach(pt => {
+    if (pt.kospi > peak) peak = pt.kospi;
+    const dd = (pt.kospi - peak) / peak * 100;
+    if (dd < maxDD) maxDD = dd;
+  });
+  return { totalRet, annRet, mdd: +maxDD.toFixed(1), sharpe: 0, vol: 0,
+    start: curve[0].date, end: curve[curve.length - 1].date, months: curve.length };
+}
+
+// 기간별 전략 KPI 사전 계산
+const KPI_BY_PERIOD = Object.fromEntries(
+  ["1년","3년","5년"].map(p => {
+    const { curve, tradeLog } = getBacktestData(p, null);
+    const fin = curve[curve.length - 1]?.strategy ?? 100;
+    const totalRet = +(fin - 100).toFixed(1);
+    const n = curve.length - 1;
+    const annRet = n >= 10 ? +((Math.pow(fin / 100, 12 / n) - 1) * 100).toFixed(1) : totalRet;
+    let peak = -Infinity, maxDD = 0;
+    curve.forEach(pt => { if (pt.strategy > peak) peak = pt.strategy; const dd = (pt.strategy - peak)/peak*100; if (dd < maxDD) maxDD = dd; });
+    const wr = tradeLog.length > 0 ? +(tradeLog.filter(t => t.ret > 0).length / tradeLog.length * 100).toFixed(1) : 0;
+    const rets = curve.slice(1).map((pt,i) => (pt.strategy - curve[i].strategy)/curve[i].strategy*100);
+    const mean = rets.reduce((a,b)=>a+b,0)/rets.length || 0;
+    const std  = Math.sqrt(rets.reduce((a,b)=>a+(b-mean)**2,0)/rets.length || 0);
+    const sharpe = std > 0 ? +((mean/std)*Math.sqrt(12)).toFixed(2) : 0;
+    return [p, { totalRet, annRet, mdd: +maxDD.toFixed(1), winRate: wr, sharpe,
+      start: curve[0]?.date ?? "", end: curve[curve.length-1]?.date ?? "" }];
+  })
+);
 
 // ── 차트 커스텀 툴팁
 const ChartTooltip = ({ active, payload, label }) => {
@@ -66,142 +157,36 @@ function parseAIChanges(changesStr) {
   return result;
 }
 
-// ── AI 전략 제안 컴포넌트
-function AISuggestions({ period, kpi, params, setParams, stratTotalRet = 0, stratMdd = 0, stratWr = 0 }) {
-  const [applied, setApplied] = useState(null);
-  const [beforeSnap, setBeforeSnap] = useState(null);
-
-  // ★ #7: v11.0 기준 (adx:20, rsi2Entry:25, zscore:1.0, trailing:10.0) AI 제안 갱신
+// ── AI 전략 제안 컴포넌트 (v12.0: 동적 계산 제거 — Python 엔진 일원화)
+function AISuggestions({ stratTotalRet = 0, stratMdd = 0, stratWr = 0 }) {
   const sug = [
-    { id:1, changes:"ADX:20→15, RSI-2:25→30",             score:0.87, comment:"추세/과매도 필터 완화 → 진입 기회↑" },
-    { id:2, changes:"Z-Score:1.0→1.3, Trailing:10.0→8.0", score:0.82, comment:"변동성 상향 + TrailingStop 강화 → MDD↓" },
-    { id:3, changes:"ADX:20→25, RSI-2:25→20",              score:0.79, comment:"추세 필터 강화 + 과매도 엄격화 → 승률↑" },
+    { id:1, changes:"ADX:30→25, RSI-2:25→30",             score:0.87, comment:"추세 필터 완화 → 진입 기회↑" },
+    { id:2, changes:"ADX:30→30, Trailing:10.0→12.0",       score:0.82, comment:"수익 극대화 설정 (칼마 5.99)" },
+    { id:3, changes:"ADX:30→30, Trailing:10.0→8.0",        score:0.79, comment:"MDD 최소화 (칼마 5.39)" },
   ];
 
-  const sugResults = useMemo(() =>
-    sug.map(s => {
-      const sp = { ...params, ...parseAIChanges(s.changes) };
-      const { curve, tradeLog } = runBacktest(period, sp);
-      const fin = curve.length > 0 ? curve[curve.length - 1].strategy : 100;
-      const nM  = Math.max(curve.length - 1, 1);
-      const ret = +(fin - 100).toFixed(1);
-      const ann = nM >= 10 ? +((Math.pow(fin / 100, 12 / nM) - 1) * 100).toFixed(1) : ret;
-      let peak = -Infinity, maxDD = 0;
-      for (const pt of curve) {
-        if (pt.strategy > peak) peak = pt.strategy;
-        const dd = (pt.strategy - peak) / peak * 100;
-        if (dd < maxDD) maxDD = dd;
-      }
-      const mdd = +maxDD.toFixed(1);
-      const wr  = tradeLog.length > 0
-        ? +(tradeLog.filter(t => t.ret > 0).length / tradeLog.length * 100).toFixed(1) : 0;
-      return { id: s.id, ret, ann, mdd, wr, trades: tradeLog.length };
-    }),
-  [period, params]); // eslint-disable-line
-
-  const handleApply = (s) => {
-    if (!setParams) return;
-    setBeforeSnap({ ret: stratTotalRet, mdd: stratMdd, wr: stratWr });
-    setParams(prev => ({ ...prev, ...parseAIChanges(s.changes) }));
-    setApplied(s.id);
-  };
-
-  const diff = (next, cur, invert = false) => {
-    const d = +(next - cur).toFixed(1);
-    if (d === 0) return <span className="text-slate-500">±0</span>;
-    const pos = invert ? d < 0 : d > 0;
-    return <span className={pos ? "text-emerald-400" : "text-red-400"}>{d > 0 ? "+" : ""}{d}</span>;
-  };
 
   return (
     <div className="bg-slate-800 rounded-xl p-4 border border-indigo-800">
       <div className="flex items-center gap-2 mb-3">
         <span>💡</span>
-        <p className="text-sm font-semibold text-indigo-300">AI 전략 제안 (Optuna TPE 30 trials)</p>
-        <span className="text-[10px] text-slate-500 ml-1">— 아래 수치는 실제 백테스팅 시뮬 결과</span>
+        <p className="text-sm font-semibold text-indigo-300">파라미터 스윕 제안 (v12.0 기준, 384조합)</p>
+        <span className="text-[10px] text-slate-500 ml-1">— 변경 시 Python 엔진 재실행 필요</span>
         <span className="ml-auto text-[10px] text-slate-500 bg-slate-700 px-2 py-0.5 rounded">
           현재: 누적 {stratTotalRet >= 0 ? "+" : ""}{stratTotalRet}% / MDD {stratMdd}% / 승률 {stratWr}%
         </span>
       </div>
-
-      {applied !== null && beforeSnap && (() => {
-        const sr = sugResults.find(r => r.id === applied);
-        if (!sr) return null;
-        return (
-          <div className="mb-3 px-3 py-2 bg-emerald-900/30 border border-emerald-700 rounded-xl text-xs flex items-center gap-4 flex-wrap">
-            <span className="text-emerald-400 font-semibold">✅ 제안 {applied} 적용됨</span>
-            <span className="text-slate-400">
-              누적 <span className="text-slate-300 font-bold">{beforeSnap.ret >= 0 ? "+" : ""}{beforeSnap.ret}%</span>
-              {" → "}
-              <span className="text-emerald-300 font-bold">{sr.ret >= 0 ? "+" : ""}{sr.ret}%</span>
-              {" "}{diff(sr.ret, beforeSnap.ret)}pp
-            </span>
-            <span className="text-slate-400">
-              MDD <span className="text-slate-300 font-bold">{beforeSnap.mdd}%</span>
-              {" → "}
-              <span className="font-bold">{sr.mdd}%</span>
-              {" "}{diff(sr.mdd, beforeSnap.mdd, true)}pp
-            </span>
-            <span className="text-slate-400">
-              승률 <span className="text-slate-300 font-bold">{beforeSnap.wr}%</span>
-              {" → "}
-              <span className="font-bold">{sr.wr}%</span>
-              {" "}{diff(sr.wr, beforeSnap.wr)}pp
-            </span>
-            <button onClick={() => { setApplied(null); setBeforeSnap(null); }}
-              className="ml-auto text-[10px] text-slate-500 hover:text-slate-300 bg-slate-700 px-2 py-0.5 rounded">✕</button>
-          </div>
-        );
-      })()}
-
       <div className="grid grid-cols-3 gap-3">
-        {sug.map((s, idx) => {
-          const sr = sugResults[idx];
-          const isApplied = applied === s.id;
-          return (
-            <div key={s.id} className={`bg-slate-900 rounded-xl p-3 border transition-all ${isApplied ? "border-emerald-500 shadow-lg shadow-emerald-900/30" : "border-slate-700 hover:border-indigo-600"}`}>
-              <div className="flex justify-between mb-2">
-                <span className={`text-xs font-bold ${isApplied ? "text-emerald-400" : "text-indigo-300"}`}>
-                  {isApplied ? "✅ 적용중" : `제안 ${s.id}`}
-                </span>
-                <span className="text-[10px] bg-indigo-900 text-indigo-300 px-1.5 py-0.5 rounded">score {s.score}</span>
-              </div>
-              <p className="text-[11px] text-slate-300 mb-2 font-mono leading-relaxed">{s.changes}</p>
-              <div className="bg-slate-800 rounded-lg p-2 mb-2 space-y-1 text-[10px]">
-                <div className="flex justify-between">
-                  <span className="text-slate-500">누적수익</span>
-                  <span>
-                    <span className={`font-bold ${sr.ret >= 0 ? "text-emerald-400" : "text-red-400"}`}>{sr.ret >= 0 ? "+" : ""}{sr.ret}%</span>
-                    <span className="text-slate-600 ml-1">({diff(sr.ret, stratTotalRet)}pp)</span>
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-500">MDD</span>
-                  <span>
-                    <span className="font-bold text-red-400">{sr.mdd}%</span>
-                    <span className="text-slate-600 ml-1">({diff(sr.mdd, stratMdd, true)}pp)</span>
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-500">승률</span>
-                  <span>
-                    <span className="font-bold text-blue-400">{sr.wr}%</span>
-                    <span className="text-slate-600 ml-1">({diff(sr.wr, stratWr)}pp)</span>
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-500">거래건수</span>
-                  <span className="font-bold text-slate-300">{sr.trades}건</span>
-                </div>
-              </div>
-              <p className="text-[10px] text-slate-500 mb-2">💬 {s.comment}</p>
-              <button onClick={() => handleApply(s)}
-                className={`w-full py-1.5 rounded text-[11px] font-semibold transition-all ${isApplied ? "bg-emerald-800 text-emerald-200 cursor-default" : "bg-indigo-700 hover:bg-indigo-600 text-white"}`}>
-                {isApplied ? "✅ 현재 적용중" : "▶ 이 파라미터로 적용"}
-              </button>
+        {sug.map(s => (
+          <div key={s.id} className="bg-slate-900 rounded-xl p-3 border border-slate-700">
+            <div className="flex justify-between mb-2">
+              <span className="text-xs font-bold text-indigo-300">제안 {s.id}</span>
+              <span className="text-[10px] bg-indigo-900 text-indigo-300 px-1.5 py-0.5 rounded">score {s.score}</span>
             </div>
-          );
-        })}
+            <p className="text-[11px] text-slate-300 mb-2 font-mono leading-relaxed">{s.changes}</p>
+            <p className="text-[10px] text-slate-500">💬 {s.comment}</p>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -213,86 +198,20 @@ export default function TabBacktest({ params, setParams, period, setPeriod, cust
   const [selectedTrade, setSelectedTrade] = useState(null);
   const [expandedCode, setExpandedCode]   = useState(null);
 
-  // ── UDB Live 데이터 (Firebase에서 GDB 이후 신규 월 로드)
-  const [liveData, setLiveData] = useState(null);
-
-  useEffect(() => {
-    getDocs(collection(db, COL.UDB)).then(snap => {
-      const udbDocs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      const liveMonthly  = buildLiveMonthly(udbDocs);
-      const liveCurve    = buildLiveEquityCurve(udbDocs);
-      const liveStockAtr = buildLiveStockATR(udbDocs);
-      const newData = { allMonthly: liveMonthly, equityCurve: liveCurve, stockAtr: liveStockAtr };
-      setLiveData(newData);
-
-      // 전략 KPI 계산 후 Firebase /config/kpi 에 저장 (Telegram 알림용)
-      try {
-        const { curve: kpiCurve, tradeLog: kpiTrades } = runBacktestLive("5년", DEFAULT_PARAMS, null, newData);
-        const fin5y = kpiCurve.length > 0 ? kpiCurve[kpiCurve.length - 1].strategy : 100;
-        const n5y   = Math.max(kpiCurve.length - 1, 1);
-        const ret5y = +(fin5y - 100).toFixed(1);
-        const ann5y = n5y >= 10 ? +((Math.pow(fin5y / 100, 12 / n5y) - 1) * 100).toFixed(1) : ret5y;
-        let pk5 = -Infinity, mdd5 = 0;
-        kpiCurve.forEach(p => {
-          if (p.strategy > pk5) pk5 = p.strategy;
-          const dd = (p.strategy - pk5) / pk5 * 100;
-          if (dd < mdd5) mdd5 = dd;
-        });
-        const wr5y = kpiTrades.length > 0
-          ? +(kpiTrades.filter(t => t.ret > 0).length / kpiTrades.length * 100).toFixed(1) : 0;
-
-        const { curve: kpiCurve3, tradeLog: kpiTrades3 } = runBacktestLive("3년", DEFAULT_PARAMS, null, newData);
-        const fin3y = kpiCurve3.length > 0 ? kpiCurve3[kpiCurve3.length - 1].strategy : 100;
-        const n3y   = Math.max(kpiCurve3.length - 1, 1);
-        const ret3y = +(fin3y - 100).toFixed(1);
-        const ann3y = n3y >= 10 ? +((Math.pow(fin3y / 100, 12 / n3y) - 1) * 100).toFixed(1) : ret3y;
-
-        const { curve: kpiCurve1, tradeLog: kpiTrades1 } = runBacktestLive("1년", DEFAULT_PARAMS, null, newData);
-        const fin1y = kpiCurve1.length > 0 ? kpiCurve1[kpiCurve1.length - 1].strategy : 100;
-        const ret1y = +(fin1y - 100).toFixed(1);
-
-        setDoc(doc(db, "config", "kpi"), {
-          "1년": { totalRet: ret1y, annRet: ret1y, mdd: 0 },
-          "3년": { totalRet: ret3y, annRet: ann3y, mdd: 0 },
-          "5년": { totalRet: ret5y, annRet: ann5y, mdd: +mdd5.toFixed(1), wr: wr5y },
-          updatedAt: new Date().toISOString(),
-          source: "TabBacktest",
-        }).catch(() => {}); // config write 실패 시 무시
-      } catch (e) {
-        console.warn("KPI Firebase 저장 실패:", e);
-      }
-    }).catch(e => {
-      console.warn("UDB 로드 실패 (GDB fallback):", e);
-    });
-  }, []); // eslint-disable-line
-
+  // ── 기간별 백테스트 데이터 (Python 엔진 결과 필터링)
   const { curve, monthly, tradeLog } = useMemo(
-    () => liveData
-      ? runBacktestLive(period, params, customRange, liveData)
-      : runBacktest(period, params, customRange),
-    [period, params, customRange, liveData]
+    () => getBacktestData(period, customRange),
+    [period, customRange]
   );
 
-  // 커스텀 기간: KOSPI200 KPI 동적 계산 (항상 live curve 우선)
-  const liveCurve = liveData?.equityCurve ?? EQUITY_CURVE_RAW;
-  const liveKPIMap = computeKPIByPeriod(liveCurve);
-
+  // ── KOSPI KPI (선택 기간)
   const kpi = (() => {
-    if (period !== "커스텀") return liveKPIMap[period] ?? liveKPIMap["5년"];
-    const raw2 = (customRange?.start && customRange?.end)
-      ? (() => {
-          const si = liveCurve.findIndex(e => e.d === customRange.start);
-          const ei = liveCurve.findIndex(e => e.d === customRange.end);
-          return (si >= 0 && ei >= si) ? liveCurve.slice(si, ei + 1) : liveCurve;
-        })()
-      : liveCurve;
-    const kospiRet = +((raw2[raw2.length-1].k / raw2[0].k - 1) * 100).toFixed(1);
-    let pk = -Infinity, md = 0;
-    raw2.forEach(p => { if (p.k > pk) pk = p.k; const dd = (p.k - pk) / pk * 100; if (dd < md) md = dd; });
-    const kospiAnn = raw2.length >= 10
-      ? +((Math.pow(raw2[raw2.length-1].k / raw2[0].k, 12 / (raw2.length - 1)) - 1) * 100).toFixed(1) : kospiRet;
-    return { totalRet: kospiRet, annRet: kospiAnn, mdd: +md.toFixed(1), vol: 0, sharpe: 0,
-             start: customRange?.start || "", end: customRange?.end || "", months: raw2.length };
+    if (period !== "커스텀") {
+      const c = getBacktestData(period, null).curve;
+      return computeKpiForCurve(c.map(pt => ({ ...pt, kospi: pt.buyhold ?? pt.kospi })), period);
+    }
+    const c = curve;
+    return computeKpiForCurve(c, period);
   })();
 
   useEffect(() => { setSelectedTrade(null); setExpandedCode(null); }, [period, params]);
@@ -356,23 +275,9 @@ export default function TabBacktest({ params, setParams, period, setPeriod, cust
     return std > 0 ? +((mean / std) * Math.sqrt(12)).toFixed(2) : 0;
   })();
 
-  // ── V3 Python 엔진 기준 KPI (상단 카드 표시용 — GDB 시뮬 아님)
+  // ── Python 엔진 기준 KPI (상단 카드 표시용)
   const v3Kpi = (() => {
     if (period !== "커스텀" && KPI_BY_PERIOD[period]) return KPI_BY_PERIOD[period];
-    // 커스텀 기간: EVOLUTION_DATA v3 슬라이스로 계산
-    if (period === "커스텀" && customRange?.start && customRange?.end) {
-      const cs = customRange.start.slice(0, 5);
-      const ce = customRange.end.slice(0, 5);
-      const sl = EVOLUTION_DATA.filter(d => d.date >= cs && d.date <= ce);
-      if (sl.length >= 2) {
-        const v3Ret = +((sl[sl.length - 1].v3 / sl[0].v3 - 1) * 100).toFixed(1);
-        let pk = -Infinity, maxDD = 0;
-        sl.forEach(d => { if (d.v3 > pk) pk = d.v3; const dd = (d.v3 - pk) / pk * 100; if (dd < maxDD) maxDD = dd; });
-        const nM = sl.length - 1;
-        const ann = nM >= 10 ? +((Math.pow(sl[sl.length - 1].v3 / sl[0].v3, 12 / nM) - 1) * 100).toFixed(1) : v3Ret;
-        return { totalRet: v3Ret, annRet: ann, mdd: +maxDD.toFixed(1), sharpe: stratShrp, vol: 0 };
-      }
-    }
     return { totalRet: stratTotalRet, annRet: stratAnnRet, mdd: stratMdd, sharpe: stratShrp };
   })();
 
@@ -438,7 +343,7 @@ export default function TabBacktest({ params, setParams, period, setPeriod, cust
     return { tradeStatsByCode: map, distinctStocks: order };
   }, [tradeLog]);
 
-  const periodEndMm = period === "커스텀" ? (customRange?.end ?? "") : (KPI_BY_PERIOD[period]?.end ?? "");
+  const periodEndMm = period === "커스텀" ? (customRange?.end ?? "") : (KPI_BY_PERIOD[period]?.end ?? FULL_CURVE[FULL_CURVE.length-1]?.date ?? "");
 
   return (
     <div className="space-y-5">
@@ -640,7 +545,19 @@ export default function TabBacktest({ params, setParams, period, setPeriod, cust
             <span className="text-[10px] bg-indigo-900/40 text-indigo-300 px-2 py-0.5 rounded">실데이터</span>
           </div>
           <div className="space-y-1.5 text-xs">
-            {Object.entries(computeYearlyStats(liveData?.allMonthly ?? ALL_MONTHLY)).map(([yr, s]) => {
+            {Object.entries((() => {
+              const map = {};
+              ALL_MONTHLY.forEach(m => {
+                const yr = "20" + m.d.slice(0, 2);
+                if (!map[yr]) map[yr] = { rets: [], peaks: [100] };
+                map[yr].rets.push(m.r);
+              });
+              return Object.fromEntries(Object.entries(map).map(([yr, v]) => {
+                const ret = +(v.rets.reduce((a, b) => a + b, 0)).toFixed(1);
+                const vol = +(Math.sqrt(v.rets.reduce((a, b) => a + b*b, 0) / v.rets.length)).toFixed(1);
+                return [yr, { ret, mdd: 0, vol }];
+              }));
+            })()).map(([yr, s]) => {
               const barW = Math.min(Math.abs(s.ret) / 100 * 100, 100);
               return (
                 <div key={yr} className="flex items-center gap-2 bg-slate-900 rounded-lg px-3 py-2">

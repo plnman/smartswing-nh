@@ -48,7 +48,7 @@ INDEX_CODE   = "069500"   # KODEX200 (KOSPI200 프록시)
 
 # ─── 파라미터 (DEFAULT_PARAMS 동기화) ────────────────────────
 DEFAULT_PARAMS = {
-    "adx": 20, "rsi2Entry": 25, "zscore": 1.0,  # ★ #6: rsi2Entry 15→25 (v11.0 파라미터 동기화)
+    "adx": 30, "rsi2Entry": 25, "zscore": 1.0,  # ★ v12.0: adx 20→30 (추세 필터 강화)
     "nSlots": 5,
     # ★ V3 확정 파라미터 (2026-03-24 그리드 탐색 후 확정)
     # Trailing 10.0%: 추세 연장 극대화, NaN 모멘텀홀드와 시너지
@@ -404,50 +404,97 @@ def run_backtest(
     daily      = load_all_daily(all_codes)
     print(f"✓ ({len(daily)}개 종목)")
 
-    trade_log = []
-    trade_id  = 1
+    trade_log      = []
+    trade_id       = 1
+    validation_trace = []   # 월별 필터 추적 (검증 버튼용)
 
     for i, m in enumerate(monthly):
-        # ── L1 Shield ─────────────────────────────────────
-        # (1) 상승월 필터
-        if m["r"] < sig_thresh:
+        trace = {"ym": m["date"], "kospi_r": m["r"], "blocked_by": None,
+                 "weak_market": False, "effective_slots": NSLOTS,
+                 "filter_counts": {}, "candidates": 0, "selected": []}
+
+        # ── L0: 시장 모멘텀 필터 (telegram 일치: abs 사용) ──
+        abs_r = abs(m["r"])
+        if abs_r < sig_thresh:
+            trace["blocked_by"] = f"L0: |{m['r']:.2f}%| < sigThresh {sig_thresh:.3f}"
+            validation_trace.append(trace)
             continue
 
         ym = m["date"]
 
-        # (2) KOSPI SMA5 이격도
+        # ── L0-B: KOSPI SMA5 이격도 ──────────────────────
         if not kospi_sma5_ok(ym):
+            trace["blocked_by"] = "L0-B: SMA5 하향이탈"
+            validation_trace.append(trace)
             continue
 
-        # (3) CVD 게이트
+        # ── L1: 하락장 + 전월 약세 (finBert Shield) ──────
+        prev_r = monthly[i - 1]["r"] if i > 0 else 0
+        if m["r"] < -1:
+            sent_score = prev_r / 15
+            if sent_score < p["finBertThresh"]:
+                trace["blocked_by"] = f"L1: 하락장({m['r']:.2f}%) AND sentScore={sent_score:.3f}<{p['finBertThresh']}"
+                validation_trace.append(trace)
+                continue
+
+        # ── L3: CVD 차단 (하락월에만 적용) ───────────────
         cvd_slice = monthly[max(0, i - cvd_months):i]
         if len(cvd_slice) >= 2:
             net_cvd = sum(1 if x["r"] > 0 else -1 for x in cvd_slice)
-            if net_cvd <= cvd_gate:
+            if net_cvd <= cvd_gate and m["r"] < 0:   # ★ 하락월 조건 추가
+                trace["blocked_by"] = f"L3: netCVD={net_cvd}≤{cvd_gate} AND 하락장"
+                validation_trace.append(trace)
                 continue
 
-        # ── 종목 선정 (RSI-2 낮은 순) ─────────────────────
-        year, month = m["year"], m["month"]
-        avail = [
+        # ── weakMarket: 슬롯 절반 ─────────────────────────
+        weak_market     = abs_r < sig_thresh * 2
+        effective_slots = max(1, NSLOTS // 2) if weak_market else NSLOTS
+        trace["weak_market"]     = weak_market
+        trace["effective_slots"] = effective_slots
+
+        # ── 종목 선정: rsi2Entry + adx 필터 + RS 혼합정렬 ──
+        year, month_n = m["year"], m["month"]
+        prev_ym       = monthly[i - 1]["date"] if i > 0 else ym
+        prev_kospi_r  = monthly[i - 1]["r"] if i > 0 else 0
+
+        avail_raw = [
             s for s in stock_list
             if gdb.get(s["code"], {}).get("rsi2", {}).get(ym) is not None
+            and gdb[s["code"]]["rsi2"][ym] <= p["rsi2Entry"]
+            and gdb.get(s["code"], {}).get("adx", {}).get(ym, 0) >= p["adx"]
         ]
-        if not avail:
+        trace["candidates"] = len(avail_raw)
+        if not avail_raw:
+            trace["blocked_by"] = "후보종목 0개"
+            validation_trace.append(trace)
             continue
 
-        ranked = sorted(avail, key=lambda s: gdb[s["code"]]["rsi2"][ym])[:NSLOTS]
+        # RS = 전월 종목수익률 - 전월 KOSPI (telegram 일치)
+        def get_rs(s):
+            prev_stock_r = gdb[s["code"]].get("monthly", {}).get(prev_ym) or 0
+            return prev_stock_r - prev_kospi_r
 
-        for slot, stock in enumerate(ranked):
+        avail_with_rs = [(s, gdb[s["code"]]["rsi2"][ym], get_rs(s)) for s in avail_raw]
+
+        # RS 순위 계산 (높은 RS → rank 0)
+        sorted_by_rs = sorted(avail_with_rs, key=lambda x: x[2], reverse=True)
+        rs_rank      = {x[0]["code"]: i / max(len(sorted_by_rs) - 1, 1)
+                        for i, x in enumerate(sorted_by_rs)}
+
+        # 혼합정렬: RSI-2 정규화×0.6 + RS역순×0.4 (낮을수록 우선)
+        ranked = sorted(avail_with_rs,
+                        key=lambda x: (x[1] / 100) * 0.6 + rs_rank[x[0]["code"]] * 0.4
+                       )[:effective_slots]
+
+        trace["selected"] = [x[0]["code"] for x in ranked]
+        validation_trace.append(trace)
+
+        for slot, (stock, rsi2_val_s, rs_val) in enumerate(ranked):
             code = stock["code"]
 
-            # 진입일 계산 (slot 기반)
-            entry_day_target = 3 + slot * 3   # 3, 6, 9, 12, 15
-            entry_dt = datetime.date(year, month, 1)
-            # 해당 월의 entry_day_target번째 영업일 근사 (달력 날짜 기준)
+            # ── 진입일: 모든 슬롯 월 첫 거래일 (실전 동일) ──
             import calendar as _cal
-            last_day = _cal.monthrange(year, month)[1]
-            target_d = min(entry_day_target, last_day)
-            entry_candidate = datetime.date(year, month, target_d)
+            entry_candidate = datetime.date(year, month_n, 1)
 
             # 실제 거래일 찾기
             if code not in daily:
@@ -456,11 +503,10 @@ def run_backtest(
             if entry_actual is None:
                 continue
             # 진입일이 당월 범위 벗어나면 스킵
-            if entry_actual.month != month or entry_actual.year != year:
+            if entry_actual.month != month_n or entry_actual.year != year:
                 continue
 
             # 보유일 계산
-            prev_r = monthly[i - 1]["r"] if i > 0 else 0
             momentum_bonus = 5 if prev_r >= 8 else (2 if prev_r >= 5 else 0)
             raw_hold  = min(25, 18 + momentum_bonus)
             hold_days = min(p["timeCut"], raw_hold) if p["timeCutOn"] else raw_hold
@@ -481,7 +527,6 @@ def run_backtest(
             if result is None:
                 continue
 
-            rsi2_val = gdb[code]["rsi2"][ym]
             pnl = round(result["ret"] / 100 * CAPITAL_PER_SLOT)
 
             trade_log.append({
@@ -495,7 +540,7 @@ def run_backtest(
                 "pnl":        pnl,
                 "reason":     result["reason"],
                 "hardStop":   hs_pct,
-                "l4":         f"RSI2:{rsi2_val:.0f}",
+                "l4":         f"RSI2:{rsi2_val_s:.0f}",
                 "slot":       slot,
                 "entryPrice": result["entry_price"],
                 "exitPrice":  result["exit_price"],
@@ -576,12 +621,13 @@ def run_backtest(
     }
 
     return {
-        "tradeLog":  trade_log,
-        "curve":     curve,
-        "kpi":       kpi,
-        "params":    p,
-        "period":    period,
-        "generated": datetime.datetime.now().isoformat(),
+        "tradeLog":        trade_log,
+        "curve":           curve,
+        "kpi":             kpi,
+        "params":          p,
+        "period":          period,
+        "validationTrace": validation_trace,
+        "generated":       datetime.datetime.now().isoformat(),
     }
 
 

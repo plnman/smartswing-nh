@@ -253,19 +253,17 @@ GDB_STOCK_POOL = [
 #  Firebase /config/params 에서 덮어씀
 # ─────────────────────────────────────────────
 PARAMS = {
-    "adx":           20,    # ADX 최소값 (시장 추세 강도 / 종목 ADX 하한)
-    "rsi2Entry":     25,    # RSI-2 진입 임계값 (이하일 때 매수) ★ Q3-A: 15→25 완화
+    "adx":           30,    # ADX 최소값 (시장 추세 강도 / 종목 ADX 하한) ★ v12.0: 20→30
+    "rsi2Entry":     25,    # RSI-2 진입 임계값 (이하일 때 매수)
     "zscore":        1.0,   # sigThresh 스케일 인자
     "nSlots":        5,     # 동시 보유 최대 종목 수
-    # hardStop: backtest.js에서도 직접 미사용 (atrMult 기반 동적 계산이 우선)
+    # hardStop: atrMult 기반 동적 계산이 우선
     # 실전 fallback용 — holdings에 hard_stop_pct 없을 때만 적용
     "hardStop":      5.3,
-    "atrMult":       1.6,   # backtest.js getStockHardStop과 동일
-                            # dynamic_hard_stop = clamp(1.5%, ATR14% × atrMult, 8.0%)
-    # trailing: 실전 전용 — pct_from_high ≤ -trailing% 시 청산 경고
-    #   backtest.js는 월별 데이터 한계로 Trailing Stop 미포함 (반락 구간 백테스트 수치 보수적)
-    "trailing":      7.6,
-    "rsi2Exit":      99,    # RSI-2 청산 임계값 (backtest.js와 완전 동일)
+    "atrMult":       1.6,   # dynamic_hard_stop = clamp(1.5%, ATR14% × atrMult, 8.0%)
+    # trailing: backtest_engine.py와 완전 동일 ★ v12.0: 7.6→10.0
+    "trailing":      10.0,
+    "rsi2Exit":      99,    # RSI-2 청산 임계값
     "finBertThresh": 0.09,  # L1: 전월 수익률/15 임계값
     "cvdWin":        70,    # CVD 윈도우 (일, /15 = 개월)
     "cvdCompare":    7,     # cvdGate = -floor(7/2) = -3
@@ -462,7 +460,7 @@ def update_high_price_and_check_stops(
 
         # global fallback (holdings에 hard_stop_pct 없는 구형 문서용)
         hard_pct_fallback = float(p.get("hardStop",  5.3))
-        trailing_pct      = float(p.get("trailing",  7.6))
+        trailing_pct      = float(p.get("trailing", 10.0))
 
         for code, info in holdings.items():
             entry_price = info.get("entry_price")
